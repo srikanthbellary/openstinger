@@ -1,5 +1,5 @@
 """
-VectraVault Engine — Tier 2 classification engine.
+StingerVault Engine — Tier 2 classification engine.
 
 Spec: OPENSTINGER_SCAFFOLD_IMPLEMENTATION_GUIDE_V3.md
 

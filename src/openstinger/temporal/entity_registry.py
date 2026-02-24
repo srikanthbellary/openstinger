@@ -27,7 +27,7 @@ class EntityRegistry:
 
     Used by:
       - TemporalEngine: register every new EntityNode
-      - VectraVault: look up UUIDs when creating knowledge graph notes
+      - StingerVault: look up UUIDs when creating knowledge graph notes
     """
 
     def __init__(self, operational_db: "OperationalDBAdapter") -> None:  # type: ignore[name-defined]

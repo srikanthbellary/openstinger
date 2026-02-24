@@ -60,7 +60,7 @@ TIER2_TOOLS = [
     ),
     types.Tool(
         name="vault_promote_now",
-        description="Trigger immediate VectraVault classification cycle.",
+        description="Trigger immediate StingerVault classification cycle.",
         inputSchema={"type": "object", "properties": {}},
     ),
     types.Tool(

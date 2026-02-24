@@ -13,7 +13,7 @@ All 11 tables across 3 tiers (additive — each tier adds tables, never removes)
 
   Tier 2 (4 tables):
     vault_notes       — vault note metadata mirror (not content)
-    classification_log — VectraVault classification cycle log
+    classification_log — StingerVault classification cycle log
     vault_checksums   — SHA-256 checksums for vault file change detection
     sync_log          — vault sync cycle log
 
@@ -244,7 +244,7 @@ class VaultNote(Base):
 # ---------------------------------------------------------------------------
 
 class ClassificationLog(Base):
-    """One row per VectraVault classification cycle completion."""
+    """One row per StingerVault classification cycle completion."""
     __tablename__ = "classification_log"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
