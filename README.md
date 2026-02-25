@@ -9,61 +9,132 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/srikanthbellary/openstinger/actions"><img src="https://img.shields.io/github/actions/workflow/status/srikanthbellary/openstinger/ci.yml?branch=main&style=for-the-badge" alt="CI"></a>
-  <a href="https://github.com/srikanthbellary/openstinger/releases"><img src="https://img.shields.io/github/v/release/srikanthbellary/openstinger?include_prereleases&style=for-the-badge" alt="Release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge" alt="MIT License"></a>
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/Python-3.10%2B-blue?style=for-the-badge&logo=python" alt="Python 3.10+"></a>
+  <a href="https://falkordb.com"><img src="https://img.shields.io/badge/FalkorDB-1.6%2B-orange?style=for-the-badge" alt="FalkorDB"></a>
+  <a href="https://modelcontextprotocol.io"><img src="https://img.shields.io/badge/MCP-1.26%2B-green?style=for-the-badge" alt="MCP"></a>
 </p>
 
-**OpenStinger** is an open-source memory and alignment harness for autonomous AI agents. It gives your agents persistent episodic memory that grows over time, a self-building knowledge vault distilled from their own sessions, and an alignment layer that keeps behavior consistent with stated values — all exposed as MCP tools your agent can call natively.
+**OpenStinger** gives autonomous AI agents persistent memory, structured self-knowledge, and alignment evaluation — all exposed as MCP tools the agent calls natively.
 
-Built on [FalkorDB](https://falkordb.com) (graph database), [Model Context Protocol](https://modelcontextprotocol.io), and an OpenAI-compatible API layer. Works alongside any agent runtime that supports MCP.
+Built on [FalkorDB](https://falkordb.com) (graph + vector database) and [Model Context Protocol](https://modelcontextprotocol.io). No SDK changes to your agent. No vendor lock-in. Works with any MCP-compatible runtime (OpenClaw, Claude Code, etc.).
 
 ---
 
 ## What It Does
 
-OpenStinger installs additively across three tiers. Start with Tier 1 and upgrade when ready.
+Three additive tiers. Start with Tier 1 and unlock the rest as data accumulates.
 
-| Tier | Name | What it adds |
-|---|---|---|
-| **Tier 1** | Memory Harness | Bi-temporal episodic memory on FalkorDB. Conflict-resolving knowledge graph. **9 MCP tools.** |
-| **Tier 2** | StingerVault | Autonomous classification of agent sessions into structured self-knowledge. **15 MCP tools total.** |
-| **Tier 3** | Gradient | Synchronous alignment evaluation before every response. Drift detection. Correction engine. **20 MCP tools total.** |
+| Tier | Name | Tools | What it gives your agent |
+|---|---|---|---|
+| **Tier 1** | Memory Harness | 9 | Bi-temporal episodic memory. Every session ingested automatically. Hybrid BM25 + vector semantic search. Date filtering. Numeric/IP search. |
+| **Tier 2** | StingerVault | 19 | Autonomous distillation of sessions into structured self-knowledge: identity, domain, methodology, preferences, constraints. External document ingestion (URL, PDF, YouTube). |
+| **Tier 3** | Gradient | 24 | Synchronous alignment evaluation before every response. Drift detection. Correction engine. Starts in observe-only mode. |
 
 ---
 
-## Quick Start
+## Quick Start (5 minutes)
 
-**Requirements:** Python 3.10+, Docker Desktop
+**Requirements:** Python 3.10+, Docker Desktop, one API key (Anthropic or any OpenAI-compatible provider)
 
+### 1. Clone and install
 ```bash
-# 1. Clone and set up
 git clone https://github.com/srikanthbellary/openstinger.git
 cd openstinger
-python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
-pip install -e ".[dev]"
+python -m venv .venv
 
-# 2. Configure
-cp .env.example .env          # add your API keys
-cp config.yaml.example config.yaml   # set sessions_dir to your agent's session folder
+# macOS / Linux
+source .venv/bin/activate
+# Windows (Git Bash)
+source .venv/Scripts/activate
+# Windows (cmd / PowerShell)
+.venv\Scripts\activate
 
-# 3. Start FalkorDB
+pip install -e "."
+```
+
+### 2. Configure
+```bash
+cp .env.example .env
+cp config.yaml.example config.yaml
+```
+
+Edit `.env` — add your API keys:
+```env
+# Anthropic (for LLM — entity extraction, dedup, conflict resolution)
+ANTHROPIC_API_KEY=sk-ant-...
+
+# OpenAI (for embeddings) — OR use any OpenAI-compatible provider
+OPENAI_API_KEY=sk-...
+
+# FalkorDB password — leave blank for local dev (simplest)
+FALKORDB_PASSWORD=
+```
+
+> **⚠️ Password gotcha:** If you set `FALKORDB_PASSWORD`, do NOT use `#` in it.
+> `.env` files treat `#` as a comment — `myPass#2026` becomes `myPass`.
+> Use only alphanumeric characters: `myPass2026` is safe.
+
+Edit `config.yaml` — the only required change:
+```yaml
+ingestion:
+  sessions_dir: "/path/to/your/agent/sessions"   # path to your agent's JSONL session files
+```
+
+### 3. Start FalkorDB
+```bash
 docker compose up -d
+```
 
-# 4. Start the MCP server (Tier 1)
+### 4. Start OpenStinger
+
+**Tier 1 only** (memory, 9 tools):
+```bash
 python -m openstinger.mcp.server
 ```
 
-Or use the startup script:
-
+**All tiers** (memory + vault + alignment, 24 tools):
 ```bash
-# Windows
-scripts\start.bat
-
-# Linux / macOS / Git Bash
-./scripts/start.sh
+python -m openstinger.gradient.mcp.server
 ```
+
+### 5. Connect your agent
+
+In your MCP client config (e.g. `mcporter.json`):
+```json
+{
+  "mcpServers": {
+    "openstinger": {
+      "baseUrl": "http://localhost:8765/sse"
+    }
+  }
+}
+```
+
+Then your agent can call:
+```bash
+mcporter call openstinger.memory_query \
+  --args '{"query": "what did we work on last week", "limit": 5}'
+```
+
+---
+
+## Using OpenAI-Compatible Providers (Novita, DeepSeek, etc.)
+
+OpenStinger works with any OpenAI-compatible API for both LLM and embeddings — no OpenAI account required.
+
+```yaml
+# config.yaml
+llm:
+  provider: openai
+  model: deepseek/deepseek-v3.2
+  llm_base_url: "https://api.novita.ai/v3/openai"
+  embedding_model: qwen/qwen3-embedding-8b
+  embedding_provider: openai
+  embedding_base_url: "https://api.novita.ai/v3/openai"
+```
+
+Set `OPENAI_API_KEY` in `.env` to your Novita (or other) API key.
 
 ---
 
@@ -71,158 +142,214 @@ scripts\start.bat
 
 ### Tier 1 — Memory (9 tools)
 
-| Tool | Description |
+| Tool | What it does |
 |---|---|
 | `memory_add` | Store an episode manually |
-| `memory_query` | Hybrid BM25 + vector semantic search |
-| `memory_search` | BM25 keyword search across episodes, entities, or facts |
-| `memory_get_entity` | Fetch an entity and its current relationships |
+| `memory_query` | Hybrid BM25 + vector search. Returns unified ranked results. Supports `after_date` / `before_date`. |
+| `memory_search` | Smart keyword search with automatic fallbacks: numeric/IP detection, temporal queries, fuzzy entity matching |
+| `memory_get_entity` | Fetch an entity and its current relationships by UUID |
 | `memory_get_episode` | Fetch a specific episode by UUID |
 | `memory_job_status` | Check ingestion job status |
 | `memory_ingest_now` | Trigger immediate session ingestion |
 | `memory_namespace_status` | Health stats: episode / entity / edge counts |
 | `memory_list_agents` | List all registered agent namespaces |
 
-### Tier 2 — StingerVault (+6 tools, 15 total)
+### Tier 2 — StingerVault (+10 tools, 19 total)
 
-`vault_status` · `vault_sync_now` · `vault_stats` · `vault_promote_now` · `vault_note_list` · `vault_note_get`
+`vault_status` · `vault_sync_now` · `vault_stats` · `vault_promote_now` · `vault_note_list` · `vault_note_get` · `knowledge_ingest` · `namespace_create` · `namespace_list` · `namespace_archive`
 
-### Tier 3 — Gradient (+5 tools, 20 total)
+### Tier 3 — Gradient (+5 tools, 24 total)
 
 `gradient_status` · `gradient_alignment_score` · `gradient_drift_status` · `gradient_alignment_log` · `gradient_alert`
 
 ---
 
-## Installation
+## Search Capabilities
 
-### Prerequisites
-
-| Requirement | Notes |
-|---|---|
-| Python 3.10+ | 3.10 or 3.11 recommended |
-| Docker Desktop | Runs FalkorDB and the browser UI |
-| LLM API key | Anthropic or any OpenAI-compatible provider (Novita, DeepSeek, etc.) |
-| Embedding API key | OpenAI or any OpenAI-compatible embedding endpoint |
-
-### Install
-
-```bash
-pip install -e ".[dev]"          # core + dev tools
-pip install -e ".[dev,tools]"    # + Datasette browser for SQLite inspection
+### Semantic search (synonyms and paraphrases)
+```python
+memory_query(query="Quinn was fired")
+# Finds episodes containing "Quinn terminated", "Quinn dismissed", etc.
 ```
 
-### Configure
-
-Edit `.env`:
-```env
-ANTHROPIC_API_KEY=sk-ant-...      # or use any OpenAI-compatible provider
-OPENAI_API_KEY=sk-...             # for embeddings
-FALKORDB_PASSWORD=your-password
+### Date-range filtering (new in v0.4)
+```python
+memory_query(query="trading decisions", after_date="2026-02", before_date="2026-03")
+memory_search(query="bot crash", search_type="episodes", after_date="2026-02-15")
 ```
 
-Edit `config.yaml` — key settings:
-```yaml
-agent_name: main
-agent_namespace: main
-
-llm:
-  provider: openai
-  model: deepseek/deepseek-v3.2
-  llm_base_url: "https://api.novita.ai/v3/openai"   # optional: use any OpenAI-compatible API
-  embedding_model: qwen/qwen3-embedding-8b
-  embedding_base_url: "https://api.novita.ai/v3/openai"
-
-ingestion:
-  sessions_dir: "/path/to/your/agent/sessions"
-  session_format: openclaw   # or: simple
-
-mcp:
-  transport: sse
-  tcp_port: 8765
+### Numeric and IP address search (new in v0.4)
+```python
+memory_search(query="167.99.222.10")        # IP address — CONTAINS fallback auto-triggered
+memory_search(query="$50 funding round")    # prices/amounts
+memory_search(query="wallet 0xDeadBeef")    # hex/wallet addresses
 ```
 
----
-
-## Upgrading Tiers
-
-```
-Tier 1  python -m openstinger.mcp.server              ← start here
-   ↓    (after ~1,000 episodes ingested)
-Tier 2  python -m openstinger.scaffold.mcp.server     ← StingerVault activates
-   ↓    (after vault builds identity notes, ~1–2 weeks)
-Tier 3  python -m openstinger.gradient.mcp.server     ← starts in observe_only mode
-```
-
----
-
-## Browser UIs
-
-Two browser tools for inspecting memory state:
-
-| URL | Tool | What it shows |
-|---|---|---|
-| `http://localhost:3000` | FalkorDB Browser | Visual knowledge graph — entities, facts, relationships |
-| `http://localhost:8001` | Datasette | SQLite operational DB — all tables |
-
-FalkorDB Browser starts automatically with `docker compose up -d`.
-Login: host `host.docker.internal` · port `6379` · username `default` · password from `.env`.
-
----
-
-## Session Formats
-
-OpenStinger parses agent session JSONL files automatically.
-
-**OpenClaw format** (`session_format: openclaw`):
-Reads user messages and assistant responses; skips thinking blocks, tool calls, and metadata.
-
-**Simple format** (`session_format: simple`):
-```json
-{"content": "...", "source": "conversation", "valid_at": 1234567890}
+### Fuzzy entity matching (new in v0.4)
+```python
+memory_search(query="Qinn", search_type="entities")
+# Finds "Quinn" via vector similarity fallback when BM25 returns nothing
 ```
 
 ---
 
 ## Architecture
 
+OpenStinger runs beside your agent — never inside it. Your agent calls MCP tools. OpenStinger reads session files in the background.
+
 ```
-Your machine
-├── OpenStinger MCP server (Python, SSE on port 8765)
-│   ├── reads: agent session files (read-only)
-│   └── writes: FalkorDB graph + SQLite operational DB
-│
-Docker
-├── FalkorDB (port 6379)         ← graph database
-└── FalkorDB Browser (port 3000) ← visual UI
+Your Agent (any MCP-compatible runtime)
+    │
+    │  Model Context Protocol · SSE · http://localhost:8765/sse
+    ▼
+OpenStinger MCP Server (Python process on your machine)
+    ├── Tier 1  memory_query · memory_add · memory_search ········  9 tools
+    ├── Tier 2  vault_promote_now · knowledge_ingest · namespace_* +10 tools
+    └── Tier 3  gradient_alignment_score · gradient_alert ·········  +5 tools
+         │
+         ├── FalkorDB  (graph DB · episodic memory · knowledge vault · vector indexes)
+         └── SQLite    (ingestion jobs · alignment events · agent registry)
+```
+
+Session files are read-only. OpenStinger never writes to your agent's files.
+
+---
+
+## Session Formats
+
+**OpenClaw format** (`session_format: openclaw`):
+OpenStinger parses OpenClaw v3 JSONL files, extracting user messages and assistant responses. Thinking blocks, tool calls, and metadata are skipped.
+
+**Simple format** (`session_format: simple`):
+One JSON object per line:
+```json
+{"content": "conversation text here", "source": "conversation", "valid_at": 1234567890}
 ```
 
 ---
 
-## Multi-Agent Setup
+## Browser UIs
 
-Each agent gets its own isolated namespace. Run separate server instances with different configs:
+| URL | Tool | Start command |
+|---|---|---|
+| `http://localhost:3000` | FalkorDB Browser (visual graph) | `docker compose up -d` (auto-starts) |
+| `http://localhost:8001` | Datasette (SQLite inspector) | `datasette .openstinger/openstinger.db --port 8001` |
+
+**FalkorDB Browser login:** host `host.docker.internal` · port `6379` · password: whatever you set in `.env` (blank = no password)
+
+> Use `host.docker.internal` NOT `localhost` — the browser runs inside Docker.
+
+---
+
+## Upgrading Tiers
+
+```
+Tier 1  python -m openstinger.mcp.server                  ← start here
+   ↓    (~1,000+ episodes ingested — usually 1–2 days)
+Tier 2  python -m openstinger.scaffold.mcp.server          ← vault activates
+   ↓    (vault builds identity + constraint notes — ~1–2 weeks)
+Tier 3  python -m openstinger.gradient.mcp.server          ← alignment activates (observe-only first)
+```
+
+Each tier includes all lower tiers. Running Tier 3 gives you all 24 tools.
+
+---
+
+## Configuration Reference
 
 ```yaml
-# config-dev.yaml
-agent_name: dev
-agent_namespace: dev
+agent_name: main               # your agent's name
+agent_namespace: main          # namespace for graph isolation
+
+falkordb:
+  host: localhost
+  port: 6379
+  password: ""                 # leave blank for local dev
+
+operational_db:
+  provider: sqlite             # sqlite (default) or postgresql
+  sqlite_path: ".openstinger/openstinger.db"
+
+llm:
+  provider: anthropic          # anthropic | openai (for OpenAI-compatible)
+  model: claude-sonnet-4-6
+  fast_model: claude-haiku-4-5-20251001
+  embedding_model: text-embedding-3-small
+  # For Novita / DeepSeek / other OpenAI-compatible:
+  # provider: openai
+  # llm_base_url: "https://api.novita.ai/v3/openai"
+  # embedding_base_url: "https://api.novita.ai/v3/openai"
+
 ingestion:
-  sessions_dir: "/path/to/dev/sessions"
+  sessions_dir: "/path/to/sessions"  # REQUIRED: path to your agent's JSONL session files
+  session_format: openclaw            # openclaw | simple
+  poll_interval_seconds: 10
+
+vault:                              # Tier 2
+  classification_interval_seconds: 300
+
+gradient:                           # Tier 3
+  enabled: false
+  observe_only: true                # always start in observe mode
+
+mcp:
+  transport: sse                    # sse (recommended) | stdio
+  tcp_port: 8765                    # change if port is taken (try 8766, 8767...)
 ```
+
+---
+
+## Troubleshooting
+
+**Server exits immediately after starting**
+Check the log (`.openstinger/openstinger.log`). Common causes:
+- FalkorDB not reachable: verify `docker ps | grep falkordb` and test with `docker exec openstinger_falkordb redis-cli ping`
+- Port in use: change `mcp.tcp_port` in `config.yaml` to a free port
+
+**FalkorDB password issue**
+If you set `FALKORDB_PASSWORD` in `.env` and FalkorDB starts without auth anyway, the password contains `#`. Rename the password to avoid `#` characters and recreate the container:
+```bash
+docker compose down
+docker volume rm openstinger_falkordb_data
+docker compose up -d
+```
+
+**Port already in use (WinError 10048 / 10013)**
+Windows may have the port reserved (Hyper-V, elevated process). Simply use a different port:
+```yaml
+mcp:
+  tcp_port: 8766   # or 8767, 8768 — whatever is free
+```
+Update your MCP client config to match.
+
+**Semantic search not working ("fired" doesn't find "terminated")**
+`memory_query` (not `memory_search`) runs vector search. Use `memory_query` for semantic recall. All episodes ingested with v0.4+ have vector embeddings.
+
+**"February 2026" returns nothing**
+Use the `after_date` / `before_date` parameters in `memory_query`:
+```python
+memory_query(query="decisions", after_date="2026-02", before_date="2026-03")
+```
+Episodes from v0.4+ also have `valid_at_human` BM25-indexed for date keyword search.
 
 ---
 
 ## Testing
 
 ```bash
-# All tests (FalkorDB must be running)
+# Without FalkorDB (fast)
+pytest tests/ -m "not integration"
+
+# Full suite (FalkorDB must be running)
 pytest tests/
 
-# Without FalkorDB
-pytest tests/ -m "not integration"
+# Specific tier
+pytest tests/ -m tier1
+pytest tests/ -m tier2
+pytest tests/ -m tier3
 ```
 
-80 tests across Tier 1, 2, and 3.
+36+ tests passing across all tiers.
 
 ---
 
