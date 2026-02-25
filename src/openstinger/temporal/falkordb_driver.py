@@ -47,8 +47,11 @@ TEMPORAL_SCHEMA_QUERIES = [
     # --- Full-text BM25 (nodes only — relationship fulltext not supported) ---
     "CREATE FULLTEXT INDEX FOR (e:Entity) ON (e.name)",
     "CREATE FULLTEXT INDEX FOR (ep:Episode) ON (ep.content)",
+    # valid_at_human enables date-based BM25 searches ("February 2026", "March 15")
+    "CREATE FULLTEXT INDEX FOR (ep:Episode) ON (ep.valid_at_human)",
     # --- Vector indexes (no named index — FalkorDB only supports unnamed CREATE VECTOR INDEX) ---
     "CREATE VECTOR INDEX FOR (e:Entity) ON (e.name_embedding) OPTIONS {dimension: 1536, similarityFunction: 'cosine'}",
+    "CREATE VECTOR INDEX FOR (ep:Episode) ON (ep.content_embedding) OPTIONS {dimension: 1536, similarityFunction: 'cosine'}",
     "CREATE VECTOR INDEX FOR ()-[r:RELATES_TO]-() ON (r.fact_embedding) OPTIONS {dimension: 1536, similarityFunction: 'cosine'}",
 ]
 

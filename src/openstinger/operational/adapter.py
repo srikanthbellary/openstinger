@@ -20,6 +20,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from openstinger.operational.models import (
+    AgentRegistry,
     AlignmentEvent,
     Base,
     ClassificationLog,
@@ -43,7 +44,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 class OperationalDBAdapter(ABC):
-    """Abstract operational database interface. All 11 tables across 3 tiers."""
+    """Abstract operational database interface. All 12 tables across 3 tiers + agents."""
 
     @abstractmethod
     async def init(self) -> None:
@@ -51,6 +52,16 @@ class OperationalDBAdapter(ABC):
 
     @abstractmethod
     async def close(self) -> None: ...
+
+    # -- AgentRegistry --
+    @abstractmethod
+    async def create_agent_registry_row(self, agent_id: str, agent_name: str, temporal_graph: str, config_hash: Optional[str] = None, created_at: Optional[int] = None) -> AgentRegistry: ...
+    @abstractmethod
+    async def list_agent_registry_rows(self, include_archived: bool = False) -> list[AgentRegistry]: ...
+    @abstractmethod
+    async def archive_agent_registry_row(self, agent_id: str) -> None: ...
+    @abstractmethod
+    async def get_agent_registry_row(self, agent_id: str) -> Optional[AgentRegistry]: ...
 
     # -- IngestionJob --
     @abstractmethod
@@ -153,6 +164,57 @@ class SQLAlchemyAdapter(OperationalDBAdapter):
 
     async def close(self) -> None:
         await self._engine.dispose()
+
+    # -- AgentRegistry --
+
+    async def create_agent_registry_row(
+        self,
+        agent_id: str,
+        agent_name: str,
+        temporal_graph: str,
+        config_hash: Optional[str] = None,
+        created_at: Optional[int] = None,
+    ) -> AgentRegistry:
+        row = AgentRegistry(
+            agent_id=agent_id,
+            agent_name=agent_name,
+            temporal_graph=temporal_graph,
+            config_hash=config_hash,
+            created_at=created_at or _now(),
+            last_active=created_at or _now(),
+        )
+        async with self._session_factory() as session:
+            session.add(row)
+            await session.commit()
+            await session.refresh(row)
+        return row
+
+    async def list_agent_registry_rows(
+        self, include_archived: bool = False
+    ) -> list[AgentRegistry]:
+        async with self._session_factory() as session:
+            q = select(AgentRegistry)
+            if not include_archived:
+                q = q.where(AgentRegistry.status == "active")
+            result = await session.execute(q.order_by(AgentRegistry.created_at.desc()))
+            return list(result.scalars().all())
+
+    async def archive_agent_registry_row(self, agent_id: str) -> None:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(AgentRegistry).where(AgentRegistry.agent_id == agent_id)
+            )
+            row = result.scalar_one_or_none()
+            if row:
+                row.status = "archived"
+                await session.commit()
+
+    async def get_agent_registry_row(self, agent_id: str) -> Optional[AgentRegistry]:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(AgentRegistry).where(AgentRegistry.agent_id == agent_id)
+            )
+            return result.scalar_one_or_none()
 
     # -- IngestionJob --
 

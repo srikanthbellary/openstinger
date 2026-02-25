@@ -41,11 +41,13 @@ class EpisodeNode(BaseModel):
     source_description: str = ""
     created_at: int = Field(default_factory=_now_unix)   # unix timestamp
     valid_at: int = Field(default_factory=_now_unix)      # when it occurred in the world
+    content_embedding: Optional[list[float]] = None       # 1536-dim vector for semantic search
+    valid_at_human: str = ""                               # BM25-searchable date e.g. "February 16 2026 February 2026"
 
     model_config = ConfigDict(populate_by_name=True)
 
     def to_cypher_props(self) -> dict:
-        return {
+        props: dict = {
             "uuid": self.uuid,
             "agent_namespace": self.agent_namespace,
             "content": self.content,
@@ -53,7 +55,11 @@ class EpisodeNode(BaseModel):
             "source_description": self.source_description,
             "created_at": self.created_at,
             "valid_at": self.valid_at,
+            "valid_at_human": self.valid_at_human,
         }
+        if self.content_embedding is not None:
+            props["content_embedding"] = self.content_embedding
+        return props
 
     @classmethod
     def from_cypher_props(cls, props: dict) -> "EpisodeNode":

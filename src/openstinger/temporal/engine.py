@@ -16,6 +16,12 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+# Month names for BM25-indexable date string on episodes
+_MONTH_NAMES = [
+    "", "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+]
+
 from openstinger.temporal.anthropic_client import AnthropicClient
 from openstinger.temporal.edges import EntityEdge, EpisodicEdge
 from openstinger.temporal.entity_registry import EntityRegistry
@@ -188,6 +194,26 @@ class TemporalEngine:
 
         # Step 1: Ontology preprocessing
         episode = await self.preprocess_ontology(episode)
+
+        # Step 1b: Compute human-readable date string for BM25 temporal search
+        # Stores e.g. "February 16 2026 February 2026" so queries like
+        # "February 2026" or "February 16" match via fulltext index.
+        try:
+            dt = datetime.fromtimestamp(episode.valid_at, tz=timezone.utc)
+            month = _MONTH_NAMES[dt.month]
+            episode.valid_at_human = (
+                f"{month} {dt.day} {dt.year} "   # "February 16 2026"
+                f"{month} {dt.year} "              # "February 2026"
+                f"{dt.year}"                       # "2026"
+            )
+        except Exception:
+            episode.valid_at_human = ""
+
+        # Step 1c: Embed episode content for semantic search
+        try:
+            episode.content_embedding = await self.embedder.embed(content)
+        except Exception as exc:
+            logger.warning("Episode embedding failed (BM25 search still works): %s", exc)
 
         # Step 2: Persist episode node first (so edges can reference it)
         await self._persist_episode(episode)
@@ -372,28 +398,66 @@ class TemporalEngine:
         agent_namespace: str | None = None,
         limit: int = 10,
         include_expired: bool = False,
+        after_unix: int | None = None,
+        before_unix: int | None = None,
     ) -> dict[str, Any]:
         """
-        Hybrid search: BM25 keyword + vector similarity on facts and entities.
-        Returns dict with keys: episodes, entities, facts.
+        Hybrid search: BM25 keyword + vector similarity on episodes, entities, and facts.
+
+        Episode search: BM25 (keyword) + vector (semantic) combined.
+        Entity search: vector on name_embedding.
+        Fact search: vector on fact_embedding.
+
+        after_unix / before_unix: optional unix timestamps to filter episodes by valid_at.
+
+        Scores are normalised — BM25 min-max to [0,1]; vector converted from
+        cosine distance to similarity (1 - distance) so higher = more relevant.
+        Returns dict with keys: episodes, entities, facts, ranked (merged list).
         """
         namespace = agent_namespace or self.agent_namespace
         query_embedding = await self.embedder.embed(query)
 
-        # BM25 search on episode content (use label name, not index name)
-        episode_rows = await self.driver.query_temporal(
-            """
+        # Build temporal filter clause for episode queries
+        time_filter = ""
+        time_params: dict[str, Any] = {}
+        if after_unix is not None:
+            time_filter += " AND node.valid_at >= $after_unix"
+            time_params["after_unix"] = after_unix
+        if before_unix is not None:
+            time_filter += " AND node.valid_at <= $before_unix"
+            time_params["before_unix"] = before_unix
+
+        # BM25 search on episode content
+        episode_bm25_rows = await self.driver.query_temporal(
+            f"""
             CALL db.idx.fulltext.queryNodes('Episode', $query)
             YIELD node, score
-            WHERE node.agent_namespace = $namespace
+            WHERE node.agent_namespace = $namespace{time_filter}
             RETURN node.uuid AS uuid, node.content AS content,
                    node.valid_at AS valid_at, score
             ORDER BY score DESC LIMIT $limit
             """,
-            {"query": query, "namespace": namespace, "limit": limit},
+            {"query": query, "namespace": namespace, "limit": limit, **time_params},
         )
 
-        # Vector search on entity names (4-arg form: label, property, count, vecf32(query))
+        # Vector search on episode content_embedding (semantic episode search)
+        episode_vec_rows: list[dict] = []
+        try:
+            episode_vec_rows = await self.driver.query_temporal(
+                f"""
+                CALL db.idx.vector.queryNodes('Episode', 'content_embedding', $limit, vecf32($embedding))
+                YIELD node, score
+                WHERE node.agent_namespace = $namespace{time_filter}
+                RETURN node.uuid AS uuid, node.content AS content,
+                       node.valid_at AS valid_at, score
+                """,
+                {"embedding": query_embedding, "namespace": namespace, "limit": limit, **time_params},
+            )
+        except Exception as exc:
+            # Vector index may not exist for episodes ingested before this version
+            logger.debug("Episode vector search unavailable: %s", exc)
+
+        # Vector search on entity names
         entity_rows = await self.driver.query_temporal(
             """
             CALL db.idx.vector.queryNodes('Entity', 'name_embedding', $limit, vecf32($embedding))
@@ -405,7 +469,7 @@ class TemporalEngine:
             {"embedding": query_embedding, "namespace": namespace, "limit": limit},
         )
 
-        # Vector search on facts (4-arg form for relationships)
+        # Vector search on facts
         expired_filter = "" if include_expired else "AND r.expired_at IS NULL"
         fact_rows = await self.driver.query_temporal(
             f"""
@@ -419,10 +483,51 @@ class TemporalEngine:
             {"embedding": query_embedding, "namespace": namespace, "limit": limit},
         )
 
+        # --- Score normalisation ---
+        # BM25: min-max normalise integer scores → [0, 1]
+        # Vector: cosine distance → similarity = max(0, 1 - distance)
+
+        def _norm_bm25(rows: list[dict]) -> list[dict]:
+            scores = [r.get("score", 0) for r in rows]
+            if not scores:
+                return rows
+            mn, mx = min(scores), max(scores)
+            if mn == mx:
+                return [{**r, "score": 1.0, "search_type": "bm25"} for r in rows]
+            return [{**r, "score": round((r.get("score", 0) - mn) / (mx - mn), 4),
+                     "search_type": "bm25"} for r in rows]
+
+        def _dist_to_sim(rows: list[dict], result_type: str) -> list[dict]:
+            return [{**r, "score": round(max(0.0, 1.0 - float(r.get("score", 1.0))), 4),
+                     "search_type": result_type} for r in rows]
+
+        ep_bm25_norm = _norm_bm25(episode_bm25_rows)
+        ep_vec_sim = _dist_to_sim(episode_vec_rows, "vector")
+        entity_sim = _dist_to_sim(entity_rows, "vector")
+        fact_sim = _dist_to_sim(fact_rows, "vector")
+
+        # Merge BM25 + vector episode results by uuid (take max score per uuid)
+        ep_merged: dict[str, dict] = {}
+        for row in ep_bm25_norm + ep_vec_sim:
+            uid = row.get("uuid", "")
+            existing = ep_merged.get(uid)
+            if existing is None or row["score"] > existing["score"]:
+                ep_merged[uid] = {**row, "result_type": "episode"}
+        episodes_final = sorted(ep_merged.values(), key=lambda x: x["score"], reverse=True)[:limit]
+
+        # Build ranked cross-type list (episodes + entities + facts by score)
+        all_results: list[dict] = (
+            [{**r, "result_type": "episode"} for r in episodes_final]
+            + [{**r, "result_type": "entity"} for r in entity_sim]
+            + [{**r, "result_type": "fact"} for r in fact_sim]
+        )
+        ranked = sorted(all_results, key=lambda x: x.get("score", 0), reverse=True)[:limit]
+
         return {
-            "episodes": episode_rows,
-            "entities": entity_rows,
-            "facts": fact_rows,
+            "episodes": episodes_final,
+            "entities": entity_sim,
+            "facts": fact_sim,
+            "ranked": ranked,
         }
 
     async def get_entity(self, uuid: str) -> Optional[dict]:

@@ -97,7 +97,11 @@ class GradientServer:
             return [types.TextContent(type="text", text=json.dumps(result, default=str))]
 
     async def _dispatch(self, name: str, args: dict) -> Any:
-        if name.startswith("memory_") or name.startswith("vault_"):
+        # Route all Tier 1+2 tools to the Scaffold server
+        if (name.startswith("memory_")
+                or name.startswith("vault_")
+                or name.startswith("knowledge_")
+                or name.startswith("namespace_")):
             return await self.tier2._dispatch(name, args)
 
         match name:
@@ -113,7 +117,18 @@ class GradientServer:
                     "corrected": result.corrected,
                 }
             case "gradient_drift_status":
-                return self.drift_detector.get_status().__dict__ if self.drift_detector else {}
+                if not self.drift_detector:
+                    return {}
+                status = self.drift_detector.get_status()
+                return {
+                    "window_size": status.window_size,
+                    "mean_score": status.mean_score,
+                    "consecutive_flags": status.consecutive_flags,
+                    "alert_active": status.alert_active,
+                    "total_evaluated": status.total_evaluated,
+                    "total_flagged": status.total_flagged,
+                    "soft_flag_rate": round(status.soft_flag_rate, 4),
+                }
             case "gradient_alignment_log":
                 return await self._get_alignment_log(args.get("limit", 20))
             case "gradient_alert":
@@ -132,25 +147,43 @@ class GradientServer:
         }
 
     async def _get_alignment_log(self, limit: int = 20) -> list:
-        """Read recent evaluation events from session_state."""
+        """Read recent evaluation events from alignment_events table."""
         try:
-            state = await self.tier2.tier1.db.get_session_state(self.cfg.agent_namespace)
-            cursors = state.get_cursors()
-            return cursors.get("gradient_events", [])[-limit:]
-        except Exception:
+            rows = await self.tier2.tier1.db.get_alignment_events(
+                agent_namespace=self.cfg.agent_namespace,
+                limit=limit,
+            )
+            return [
+                {
+                    "event_uuid": r.uuid,
+                    "verdict": r.verdict,
+                    "scores": json.loads(r.scores_json) if r.scores_json else {},
+                    "issues": json.loads(r.issues_json) if r.issues_json else [],
+                    "corrected": bool(r.corrected),
+                    "profile_state": r.profile_state,
+                    "latency_ms": r.latency_ms,
+                    "evaluated_at": r.evaluated_at,
+                }
+                for r in rows
+            ]
+        except Exception as exc:
+            logger.debug("gradient_alignment_log error: %s", exc)
             return []
 
     async def _get_alert_status(self) -> dict:
-        try:
-            state = await self.tier2.tier1.db.get_session_state(self.cfg.agent_namespace)
-            cursors = state.get_cursors()
-            alert = cursors.get("drift_alert")
-            return {
-                "alert_active": self.drift_detector._alert_active if self.drift_detector else False,
-                "last_alert": alert,
-            }
-        except Exception:
-            return {"alert_active": False}
+        """Read drift alert status from DriftDetector in-memory state."""
+        if not self.drift_detector:
+            return {"alert_active": False, "window_mean": 1.0, "consecutive_flags": 0,
+                    "soft_flag_rate": 0.0, "total_evaluated": 0, "total_flagged": 0}
+        status = self.drift_detector.get_status()
+        return {
+            "alert_active": status.alert_active,
+            "window_mean": round(status.mean_score, 4),
+            "consecutive_flags": status.consecutive_flags,
+            "soft_flag_rate": round(status.soft_flag_rate, 4),
+            "total_evaluated": status.total_evaluated,
+            "total_flagged": status.total_flagged,
+        }
 
     async def startup(self) -> None:
         cfg = self.cfg

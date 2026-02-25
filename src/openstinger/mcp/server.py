@@ -70,7 +70,11 @@ TOOL_SCHEMAS: list[types.Tool] = [
     ),
     types.Tool(
         name="memory_query",
-        description="Hybrid search (BM25 + vector) across episodes, entities, and facts.",
+        description=(
+            "Hybrid semantic search (BM25 + vector) across episodes, entities, and facts. "
+            "Returns a unified 'ranked' list with normalized scores (all comparable 0.0–1.0). "
+            "Use after_date / before_date to restrict to a time window (e.g. after_date='2026-02')."
+        ),
         inputSchema={
             "type": "object",
             "properties": {
@@ -78,13 +82,28 @@ TOOL_SCHEMAS: list[types.Tool] = [
                 "limit": {"type": "integer", "default": 10},
                 "include_expired": {"type": "boolean", "default": False},
                 "agent_namespace": {"type": "string"},
+                "after_date": {
+                    "type": "string",
+                    "description": "ISO date filter — only return episodes on/after this date. Format: YYYY-MM-DD or YYYY-MM",
+                },
+                "before_date": {
+                    "type": "string",
+                    "description": "ISO date filter — only return episodes on/before this date. Format: YYYY-MM-DD or YYYY-MM",
+                },
             },
             "required": ["query"],
         },
     ),
     types.Tool(
         name="memory_search",
-        description="BM25 full-text search across episodes, entities, or facts.",
+        description=(
+            "Smart keyword search across episodes, entities, or facts. "
+            "Automatically handles: numeric data (IP addresses, prices, wallet addresses), "
+            "temporal queries (month/year searches like 'February 2026'), "
+            "fuzzy matching (typos — 'Qinn' finds 'Quinn' via vector fallback). "
+            "Falls back from BM25 → vector → CONTAINS if primary search returns no results. "
+            "Supports date filtering via after_date / before_date."
+        ),
         inputSchema={
             "type": "object",
             "properties": {
@@ -96,6 +115,14 @@ TOOL_SCHEMAS: list[types.Tool] = [
                 },
                 "limit": {"type": "integer", "default": 10},
                 "agent_namespace": {"type": "string"},
+                "after_date": {
+                    "type": "string",
+                    "description": "ISO date — only return results on/after this date. Format: YYYY-MM-DD or YYYY-MM",
+                },
+                "before_date": {
+                    "type": "string",
+                    "description": "ISO date — only return results on/before this date. Format: YYYY-MM-DD or YYYY-MM",
+                },
             },
             "required": ["query"],
         },

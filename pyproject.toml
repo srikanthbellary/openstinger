@@ -23,8 +23,9 @@ dependencies = [
     "uvicorn>=0.32.0",
     # Data validation
     "pydantic>=2.9.2",
-    # Async HTTP
+    # Async HTTP (used by knowledge/sources/url.py)
     "aiohttp>=3.10.10",
+    "httpx>=0.27.0",
     # ORM
     "sqlalchemy>=2.0.0",
     "aiosqlite>=0.20.0",
@@ -40,6 +41,10 @@ dependencies = [
     # Async utilities
     "anyio>=4.4.0",
     "tenacity>=9.0.0",
+    # CLI
+    "click>=8.1.0",
+    # Scheduling (APScheduler — optional but included for Tier 2)
+    "apscheduler>=3.10.0",
 ]
 
 [project.optional-dependencies]
@@ -56,6 +61,14 @@ postgres = [
     "asyncpg>=0.30.0",
     "psycopg2-binary>=2.9.9",
 ]
+# Optional document ingestion dependencies (knowledge/ module)
+# Install with: pip install -e ".[knowledge]"
+knowledge = [
+    "beautifulsoup4>=4.12.0",     # URL HTML extraction
+    "pdfplumber>=0.11.0",          # PDF extraction (primary)
+    "pypdf>=4.0.0",                # PDF extraction (fallback)
+    "youtube-transcript-api>=0.6.0",  # YouTube transcript
+]
 # Browser-based inspection and verification tools
 # Install with: pip install -e ".[tools]"
 tools = [
@@ -66,6 +79,7 @@ tools = [
 openstinger = "openstinger.mcp.server:main"
 openstinger-scaffold = "openstinger.scaffold.mcp.server:main"
 openstinger-gradient = "openstinger.gradient.mcp.server:main"
+openstinger-cli = "openstinger.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

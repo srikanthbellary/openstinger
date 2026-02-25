@@ -145,7 +145,8 @@ class VaultEngine:
         self._ensure_dirs()
 
     def _ensure_dirs(self) -> None:
-        for d in [self.self_dir, self.notes_dir, self.ops_dir]:
+        moc_dir = self.vault_dir / "notes" / "moc"
+        for d in [self.self_dir, self.notes_dir, self.ops_dir, moc_dir]:
             d.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------
@@ -296,12 +297,16 @@ class VaultEngine:
     async def _find_similar_note(
         self, content: str, category: str
     ) -> Optional[dict]:
-        """Find existing note in knowledge graph via vector similarity."""
+        """Find existing note in knowledge graph via vector similarity.
+
+        Uses cosine distance: score < 0.3 means similarity > 0.7 — close enough to evolve.
+        4-arg form: (label, property, k, vecf32(query)) — required by FalkorDB 1.6+.
+        """
         try:
             embedding = await self.embedder.embed(content)
             rows = await self.driver.query_knowledge(
                 """
-                CALL db.idx.vector.queryNodes('note_embedding_idx', $embedding, 3)
+                CALL db.idx.vector.queryNodes('Note', 'content_embedding', $limit, vecf32($embedding))
                 YIELD node, score
                 WHERE node.agent_namespace = $ns AND node.category = $category
                       AND score < 0.3 AND node.stale = 0
@@ -313,10 +318,12 @@ class VaultEngine:
                     "embedding": embedding,
                     "ns": self.agent_namespace,
                     "category": category,
+                    "limit": 3,
                 },
             )
             return rows[0] if rows else None
-        except Exception:
+        except Exception as exc:
+            logger.debug("VaultEngine._find_similar_note failed: %s", exc)
             return None
 
     async def _evolve_note(
@@ -488,8 +495,10 @@ class VaultEngine:
         )
 
     async def _write_category_moc(self, category: str, notes: list[dict]) -> None:
-        """Write a category Map of Content file."""
-        moc_path = self.vault_dir / f"MOC_{category}.md"
+        """Write a category Map of Content file under vault/notes/moc/."""
+        moc_dir = self.vault_dir / "notes" / "moc"
+        moc_dir.mkdir(parents=True, exist_ok=True)
+        moc_path = moc_dir / f"moc_{category}.md"
         lines = [f"# {category.upper()} — Map of Content\n"]
         for note in notes:
             snippet = note["content"][:80].replace("\n", " ")
@@ -497,11 +506,13 @@ class VaultEngine:
         moc_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     async def _write_hub_moc(self, categories: list[str]) -> None:
-        """Write the hub MOC linking all category MOCs."""
-        hub_path = self.vault_dir / "MOC_HUB.md"
+        """Write the hub MOC linking all category MOCs under vault/notes/moc/."""
+        moc_dir = self.vault_dir / "notes" / "moc"
+        moc_dir.mkdir(parents=True, exist_ok=True)
+        hub_path = moc_dir / "moc_hub.md"
         lines = ["# Vault Hub — Map of Content\n"]
         for cat in categories:
-            lines.append(f"- [[MOC_{cat}]] — {cat}")
+            lines.append(f"- [[moc_{cat}]] — {cat}")
         hub_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     # ------------------------------------------------------------------
