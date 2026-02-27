@@ -387,10 +387,63 @@ class VaultEngine:
             confidence=float(note_data.get("confidence", 0.85)),
         )
 
+        # v0.6 Layer 4: link to semantically similar notes
+        if embedding:
+            await self._link_similar_notes(note_uuid, embedding)
+
         # Write markdown file
         await self._write_note_file(note_uuid, category, content)
         logger.debug("Created note %s [%s]", note_uuid[:8], category)
         return note_uuid
+
+    async def _link_similar_notes(self, note_uuid: str, embedding: list) -> None:
+        """
+        After creating a note, find the top-3 semantically similar existing notes
+        and create [:SIMILAR_TO] edges between them.
+
+        Uses cosine distance < 0.25 (high similarity threshold) to avoid noise.
+        Existing [:SIMILAR_TO] edges are merged (MERGE not CREATE) to stay idempotent.
+        Non-fatal: if linking fails, note creation remains valid.
+        """
+        try:
+            rows = await self.driver.query_knowledge(
+                """
+                CALL db.idx.vector.queryNodes('Note', 'content_embedding', $k, vecf32($emb))
+                YIELD node, score
+                WHERE node.agent_namespace = $ns
+                  AND node.uuid <> $src_uuid
+                  AND node.stale = 0
+                  AND score < 0.25
+                RETURN node.uuid AS target_uuid, score
+                LIMIT 3
+                """,
+                {
+                    "emb": embedding,
+                    "ns": self.agent_namespace,
+                    "src_uuid": note_uuid,
+                    "k": 5,
+                },
+            )
+            for row in rows:
+                await self.driver.query_knowledge(
+                    """
+                    MATCH (a:Note {uuid: $src}), (b:Note {uuid: $tgt})
+                    MERGE (a)-[:SIMILAR_TO {score: $score, created_at: $ts}]->(b)
+                    """,
+                    {
+                        "src": note_uuid,
+                        "tgt": row["target_uuid"],
+                        "score": round(row["score"], 6),
+                        "ts": int(time.time()),
+                    },
+                )
+            if rows:
+                logger.debug(
+                    "Linked note %s to %d similar notes", note_uuid[:8], len(rows)
+                )
+        except Exception as exc:
+            # Non-fatal: note was created, linking is best-effort
+            logger.debug("_link_similar_notes failed (note=%s): %s", note_uuid[:8], exc)
 
     # ------------------------------------------------------------------
     # Step 4: Decay

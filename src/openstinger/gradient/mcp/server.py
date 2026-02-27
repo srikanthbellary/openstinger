@@ -1,14 +1,19 @@
 """
 Tier 3 (Gradient) MCP server.
 
-Routes all 15 Tier 1+2 tools unchanged + adds 5 Gradient tools = 20 total.
+Routes all 15 Tier 1+2 tools unchanged + adds 5 Gradient tools + 3 ops tools = 23 total.
 
-New tools:
+Gradient tools:
   gradient_status         — gradient health, profile state, observe_only flag
   gradient_alignment_score — evaluate a text and return score + verdict
   gradient_drift_status   — rolling window stats
   gradient_alignment_log  — recent evaluation log
   gradient_alert          — current alert status
+
+Observability tools (v0.6):
+  ops_status              — single-call dashboard: vault + classification + drift + alignment
+  gradient_history        — last N alignment verdicts from PostgreSQL
+  drift_status            — drift window history from PostgreSQL
 """
 
 from __future__ import annotations
@@ -69,6 +74,43 @@ GRADIENT_TOOLS = [
         name="gradient_alert",
         description="Get current drift alert status.",
         inputSchema={"type": "object", "properties": {}},
+    ),
+    # --- v0.6 Observability Tools ---
+    types.Tool(
+        name="ops_status",
+        description=(
+            "Single-call operational dashboard. Returns vault note counts by category, "
+            "last classification cycle stats, gradient alignment pass rate (last 20), "
+            "and current drift state. Use this at session start for a full health check."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "agent_namespace": {"type": "string", "default": "main"},
+            },
+        },
+    ),
+    types.Tool(
+        name="gradient_history",
+        description="Get last N alignment evaluation verdicts with scores from the operational DB.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "default": 20},
+                "agent_namespace": {"type": "string", "default": "main"},
+            },
+        },
+    ),
+    types.Tool(
+        name="drift_status",
+        description="Get behavioral drift window history from the operational DB.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "default": 5},
+                "agent_namespace": {"type": "string", "default": "main"},
+            },
+        },
     ),
 ]
 
@@ -133,6 +175,18 @@ class GradientServer:
                 return await self._get_alignment_log(args.get("limit", 20))
             case "gradient_alert":
                 return await self._get_alert_status()
+            case "ops_status":
+                return await self._ops_status(args.get("agent_namespace", self.cfg.agent_namespace))
+            case "gradient_history":
+                return await self._gradient_history(
+                    args.get("agent_namespace", self.cfg.agent_namespace),
+                    int(args.get("limit", 20)),
+                )
+            case "drift_status":
+                return await self._drift_status(
+                    args.get("agent_namespace", self.cfg.agent_namespace),
+                    int(args.get("limit", 5)),
+                )
             case _:
                 return {"error": f"Unknown tool: {name}"}
 
@@ -184,6 +238,103 @@ class GradientServer:
             "total_evaluated": status.total_evaluated,
             "total_flagged": status.total_flagged,
         }
+
+    async def _ops_status(self, namespace: str) -> dict:
+        """v0.6: Single-call operational dashboard."""
+        db = self.tier2.tier1.db
+        try:
+            # Vault notes by category
+            notes = await db.list_vault_notes(namespace)
+            note_counts: dict = {}
+            for n in notes:
+                note_counts[n.category] = note_counts.get(n.category, 0) + 1
+
+            # Last classification cycle
+            class_log = await db.get_classification_history(namespace, limit=1)
+            last_cycle = class_log[0] if class_log else None
+
+            # Alignment pass rate (last 20)
+            events = await db.get_alignment_events(namespace, limit=20)
+            pass_rate = (
+                sum(1 for e in events if e.verdict == "pass") / max(len(events), 1)
+            )
+
+            # Drift state (last entry)
+            drift_rows = await db.get_drift_history(namespace, limit=1)
+            last_drift = drift_rows[0] if drift_rows else None
+
+            return {
+                "vault_notes": note_counts,
+                "total_active_notes": len(notes),
+                "last_classification": {
+                    "notes_created": last_cycle.notes_created if last_cycle else 0,
+                    "notes_evolved": last_cycle.notes_evolved if last_cycle else 0,
+                    "episodes_processed": last_cycle.episodes_processed if last_cycle else 0,
+                    "completed_at": last_cycle.completed_at if last_cycle else None,
+                } if last_cycle else None,
+                "gradient": {
+                    "alignment_pass_rate_last_20": round(pass_rate, 3),
+                    "total_evaluated": len(events),
+                    "drift_mean_score": round(last_drift.mean_score, 4) if last_drift else None,
+                    "consecutive_flags": last_drift.consecutive_flags if last_drift else 0,
+                    "alert_triggered": bool(last_drift.alert_triggered) if last_drift else False,
+                },
+                "gradient_observe_only": self.cfg.gradient.observe_only,
+                "namespace": namespace,
+            }
+        except Exception as exc:
+            logger.warning("ops_status error: %s", exc)
+            return {"error": str(exc), "namespace": namespace}
+
+    async def _gradient_history(self, namespace: str, limit: int = 20) -> list:
+        """v0.6: Recent alignment verdicts from PostgreSQL."""
+        db = self.tier2.tier1.db
+        try:
+            rows = await db.get_alignment_events(namespace, limit=limit)
+            pass_count = sum(1 for r in rows if r.verdict == "pass")
+            return {
+                "events": [
+                    {
+                        "verdict": r.verdict,
+                        "value_coherence_score": json.loads(r.scores_json or "{}").get(
+                            "value_coherence", None
+                        ),
+                        "issues": json.loads(r.issues_json or "[]"),
+                        "corrected": bool(r.corrected),
+                        "evaluated_at": r.evaluated_at,
+                        "latency_ms": r.latency_ms,
+                    }
+                    for r in rows
+                ],
+                "total": len(rows),
+                "pass_rate": round(pass_count / max(len(rows), 1), 3),
+            }
+        except Exception as exc:
+            logger.warning("gradient_history error: %s", exc)
+            return {"error": str(exc)}
+
+    async def _drift_status(self, namespace: str, limit: int = 5) -> dict:
+        """v0.6: Drift window history from PostgreSQL."""
+        db = self.tier2.tier1.db
+        try:
+            rows = await db.get_drift_history(namespace, limit=limit)
+            return {
+                "history": [
+                    {
+                        "mean_score": round(d.mean_score, 4),
+                        "consecutive_flags": d.consecutive_flags,
+                        "soft_flag_rate": round(d.soft_flag_rate, 4),
+                        "total_evaluated": d.total_evaluated,
+                        "alert_triggered": bool(d.alert_triggered),
+                        "recorded_at": d.recorded_at,
+                    }
+                    for d in rows
+                ],
+                "current_in_memory": await self._get_alert_status(),
+            }
+        except Exception as exc:
+            logger.warning("drift_status error: %s", exc)
+            return {"error": str(exc)}
 
     async def startup(self) -> None:
         cfg = self.cfg

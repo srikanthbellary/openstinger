@@ -1,5 +1,5 @@
 """
-IngestionSchedulerRegistry — manages per-agent ingestion pipelines (v0.5).
+IngestionSchedulerRegistry — manages per-agent ingestion pipelines (v0.5 / v0.6).
 
 Spec: OPENSTINGER_IMPLEMENTATION_GUIDE_V3.md §IngestionSchedulerRegistry
 
@@ -10,11 +10,13 @@ Each named agent gets its own:
 
 v0.5 changes:
   - Fixed episode_log bug: each ingested episode is now recorded in the
-    operational DB via db.log_episode() so progress is visible in Datasette.
+    operational DB via db.log_episode() so progress is visible.
   - Added parallel concurrency: episodes within a batch are processed via
     asyncio.gather() controlled by the ingestion.concurrency config option.
-    Default = 5 parallel episodes. Cap at 10 to stay under Novita rate limits.
-    Set concurrency=1 to restore sequential behaviour.
+
+v0.6 changes:
+  - ingestion_jobs table now populated: a job row is created before each
+    batch and updated with episode count on completion.
 """
 
 from __future__ import annotations
@@ -104,9 +106,11 @@ class IngestionSchedulerRegistry:
         """
         Process a batch of raw episode dicts from SessionReader.
 
+        v0.6: Creates an ingestion_jobs row before processing and updates it
+        with the episode count on completion or marks it failed on error.
         Episodes are processed in parallel (up to self._concurrency[namespace]
         at a time). Each successfully processed episode is recorded in the
-        operational DB via db.log_episode() — fixing the v0.4 episode_log bug.
+        operational DB via db.log_episode().
         """
         engine = self._engines.get(namespace)
         if engine is None:
@@ -116,7 +120,24 @@ class IngestionSchedulerRegistry:
         db = self._dbs.get(namespace)
         concurrency = self._concurrency.get(namespace, 1)
 
+        # v0.6: Create a job row before processing
+        job = None
+        if db is not None:
+            try:
+                # Try to get source file from first episode
+                source_file = batch[0].get("session_file") if batch else None
+                job = await db.create_job(
+                    agent_namespace=namespace,
+                    source_file=source_file,
+                    source_type="session_jsonl",
+                )
+            except Exception as job_exc:
+                logger.debug("ingestion_jobs create failed: %s", job_exc)
+
+        successful_count = 0
+
         async def _ingest_one(episode_dict: dict) -> None:
+            nonlocal successful_count
             """Process a single episode and log it to the DB."""
             try:
                 episode = await engine.add_episode(
@@ -126,8 +147,7 @@ class IngestionSchedulerRegistry:
                     valid_at=episode_dict.get("valid_at"),
                     agent_namespace=namespace,
                 )
-                # v0.5 FIX: record episode in operational DB so progress is
-                # visible in Datasette and memory_job_status can report it.
+                # v0.5 FIX: record episode in operational DB
                 if episode is not None and db is not None:
                     try:
                         episode_uuid = getattr(episode, "uuid", None) or str(episode)
@@ -135,12 +155,13 @@ class IngestionSchedulerRegistry:
                             episode_uuid=episode_uuid,
                             agent_namespace=namespace,
                             source=episode_dict.get("source", "conversation"),
-                            entity_count=0,   # TemporalEngine doesn't surface count post-call
-                            edge_count=0,     # acceptable placeholder for progress tracking
+                            entity_count=0,
+                            edge_count=0,
+                            job_uuid=job.uuid if job else None,
                             valid_at=episode_dict.get("valid_at", int(time.time())),
                         )
+                        successful_count += 1
                     except Exception as log_exc:
-                        # Non-fatal: episode was ingested, just not logged
                         logger.debug(
                             "episode_log write failed (namespace=%r): %s", namespace, log_exc
                         )
@@ -159,13 +180,22 @@ class IngestionSchedulerRegistry:
         tasks = [asyncio.create_task(_guarded(ep)) for ep in batch]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # Log any unexpected exceptions that bubbled through
+        # Log any unexpected exceptions
         for i, result in enumerate(results):
             if isinstance(result, Exception):
                 logger.error(
                     "Unexpected error in parallel ingestion task %d (namespace=%r): %s",
                     i, namespace, result,
                 )
+
+        # v0.6: Update job row with final episode count
+        if job is not None and db is not None:
+            try:
+                job.status = "done"
+                job.episodes_processed = successful_count
+                await db.update_job(job)
+            except Exception as job_exc:
+                logger.debug("ingestion_jobs update failed: %s", job_exc)
 
     async def ingest_now(self, namespace: str) -> int:
         """Trigger immediate ingestion for a namespace."""
