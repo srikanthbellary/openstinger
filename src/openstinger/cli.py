@@ -95,6 +95,131 @@ if _HAS_CLICK:
         """Check FalkorDB connectivity, operational DB, and configuration."""
         asyncio.run(_health_check(config))
 
+    # -----------------------------------------------------------------------
+    # openstinger-cli progress
+    # -----------------------------------------------------------------------
+
+    @cli.command()
+    @click.option("--config", default="config.yaml", help="Path to config file")
+    def progress(config: str) -> None:
+        """Show ingestion progress, vault notes, and gradient readiness."""
+        asyncio.run(_progress(config))
+
+    async def _progress(config_path: str) -> None:
+        import os, sqlite3, json
+        from openstinger.config import load_config
+        from openstinger.temporal.falkordb_driver import wait_for_falkordb
+
+        cfg = load_config(config_path if Path(config_path).exists() else None)
+        db_path = cfg.resolved_sqlite_path()
+
+        click.echo("=" * 52)
+        click.echo(" OpenStinger v0.5 — Live Progress")
+        click.echo("=" * 52)
+
+        # ── Ingestion cursor progress ──────────────────────────────────────
+        sessions_dir = cfg.resolved_sessions_dir()
+        total_bytes = 0
+        consumed_bytes = 0
+        files_started = 0
+        files_done = 0
+
+        if sessions_dir and Path(str(sessions_dir)).exists():
+            all_files = list(Path(str(sessions_dir)).glob("*.jsonl"))
+            total_bytes = sum(f.stat().st_size for f in all_files)
+
+            try:
+                conn = sqlite3.connect(str(db_path))
+                row = conn.execute(
+                    "SELECT session_file_cursor_json FROM session_state WHERE agent_namespace = ?",
+                    (cfg.agent_namespace,),
+                ).fetchone()
+                conn.close()
+                cursors: dict = json.loads(row[0] or "{}") if row else {}
+                consumed_bytes = sum(v for v in cursors.values() if isinstance(v, int) and v > 0)
+                files_started = sum(1 for v in cursors.values() if isinstance(v, int) and v > 0)
+                files_done = sum(
+                    1 for fname, pos in cursors.items()
+                    if isinstance(pos, int) and pos > 0
+                    and (sessions_dir / Path(fname).name).exists()
+                    and pos >= (sessions_dir / Path(fname).name).stat().st_size
+                )
+            except Exception as exc:
+                click.echo(f"  (cursor read error: {exc})")
+
+        pct = (consumed_bytes / total_bytes * 100) if total_bytes else 0
+        click.echo(f"\nIngestion (namespace={cfg.agent_namespace}):")
+        click.echo(f"  Files:    {files_done} done / {files_started} started / {len(all_files) if sessions_dir else '?'} total")
+        click.echo(f"  Bytes:    {consumed_bytes/1024/1024:.1f} MB / {total_bytes/1024/1024:.1f} MB  ({pct:.1f}%)")
+
+        # ── FalkorDB live counts ───────────────────────────────────────────
+        try:
+            driver = await wait_for_falkordb(
+                cfg.falkordb.host, cfg.falkordb.port, cfg.falkordb.password,
+                timeout_seconds=5.0,
+            )
+            await driver.init_schema()
+            rows = await driver.query_temporal("MATCH (ep:Episode) RETURN count(ep) AS n")
+            episodes = rows[0].get("n", 0) if rows else 0
+            rows = await driver.query_temporal("MATCH (e:Entity) RETURN count(e) AS n")
+            entities = rows[0].get("n", 0) if rows else 0
+            rows = await driver.query_temporal("MATCH ()-[r:RELATES_TO]-() RETURN count(r) AS n")
+            facts = rows[0].get("n", 0) if rows else 0
+
+            # Vault notes
+            cats = ["identity", "domain", "methodology", "preference", "constraint"]
+            note_counts: dict[str, int] = {}
+            for cat in cats:
+                cat_rows = await driver.query_knowledge(
+                    "MATCH (n:Note {agent_namespace: $ns, category: $cat}) "
+                    "WHERE n.stale = 0 RETURN count(n) AS n",
+                    {"ns": cfg.agent_namespace, "cat": cat},
+                )
+                note_counts[cat] = cat_rows[0].get("n", 0) if cat_rows else 0
+            total_notes = sum(note_counts.values())
+
+            await driver.close()
+
+            click.echo(f"\nFalkorDB (namespace={cfg.agent_namespace}):")
+            click.echo(f"  Episodes: {episodes:,}")
+            click.echo(f"  Entities: {entities:,}")
+            click.echo(f"  Facts:    {facts:,}")
+
+            click.echo(f"\nVault notes (total active={total_notes}):")
+            for cat, n in note_counts.items():
+                bar = "█" * min(n, 20)
+                click.echo(f"  {cat:15s} {n:3d}  {bar}")
+
+            # ── Gradient readiness ─────────────────────────────────────────
+            identity_ok = note_counts.get("identity", 0) >= 15
+            constraint_ok = note_counts.get("constraint", 0) >= 10
+            click.echo(f"\nGradient activation readiness:")
+            click.echo(f"  identity notes ≥ 15:    {'✅' if identity_ok else '❌'}  (have {note_counts.get('identity',0)})")
+            click.echo(f"  constraint notes ≥ 10:  {'✅' if constraint_ok else '❌'}  (have {note_counts.get('constraint',0)})")
+            if identity_ok and constraint_ok:
+                click.echo("  → READY: set gradient.observe_only: false in config.yaml, then restart.")
+            else:
+                need_id = max(0, 15 - note_counts.get("identity", 0))
+                need_co = max(0, 10 - note_counts.get("constraint", 0))
+                click.echo(f"  → Not ready yet. Need {need_id} more identity, {need_co} more constraint notes.")
+                click.echo("     Vault builds notes automatically as more episodes are ingested.")
+        except Exception as exc:
+            click.echo(f"  FalkorDB unavailable: {exc}")
+
+        # ── Embedding cache ────────────────────────────────────────────────
+        try:
+            from openstinger.storage.embedding_cache import EmbeddingCache
+            cache_path = db_path.parent / "embed_cache.db"
+            if cache_path.exists():
+                ec = EmbeddingCache(cache_path, cfg.llm.embedding_model)
+                stats = await ec.stats()
+                click.echo(f"\nEmbedding cache: {stats.get('total_entries',0)} entries, {stats.get('total_hits',0)} hits")
+        except Exception:
+            pass
+
+        click.echo("=" * 52)
+
+
     async def _health_check(config_path: str) -> None:
         from openstinger.config import load_config
 

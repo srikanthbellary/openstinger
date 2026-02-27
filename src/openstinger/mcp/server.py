@@ -48,6 +48,7 @@ from openstinger.temporal.engine import TemporalEngine
 from openstinger.temporal.entity_registry import EntityRegistry
 from openstinger.temporal.falkordb_driver import wait_for_falkordb
 from openstinger.temporal.openai_embedder import OpenAIEmbedder
+from openstinger.storage.embedding_cache import CachedEmbedder, EmbeddingCache
 
 logger = logging.getLogger(__name__)
 
@@ -280,6 +281,14 @@ class OpenStingerServer:
             base_url=cfg.llm.embedding_base_url or None,
         )
 
+        # v0.5: wrap embedder with SQLite-backed cache to eliminate redundant
+        # API calls during vault re-syncs and repeated entity embedding.
+        _cache_db = cfg.resolved_sqlite_path().parent / "embed_cache.db"
+        _embed_cache = EmbeddingCache(db_path=_cache_db, model_name=cfg.llm.embedding_model)
+        await _embed_cache.init()
+        self.embedder = CachedEmbedder(embedder=self.embedder, cache=_embed_cache)
+        logger.info("EmbeddingCache initialised: %s", _cache_db)
+
         # 4. Entity registry + temporal engine
         self.entity_registry = EntityRegistry(self.db)
         await self.entity_registry.warmup()
@@ -314,6 +323,7 @@ class OpenStingerServer:
             poll_interval=cfg.ingestion.poll_interval_seconds,
             chunk_size=cfg.ingestion.chunk_size,
             session_format=cfg.ingestion.session_format,
+            concurrency=cfg.ingestion.concurrency,
         )
 
         logger.info("OpenStinger ready: namespace=%s", cfg.agent_namespace)

@@ -123,6 +123,7 @@ class IngestionConfig(BaseModel):
     poll_interval_seconds: int = 5
     chunk_size: int = 10
     session_format: str = "openclaw"  # "openclaw" | "simple"
+    concurrency: int = 5             # max parallel episodes per batch (1=sequential, 10=max)
 
 
 class DeduplicationConfig(BaseModel):
