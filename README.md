@@ -29,7 +29,7 @@ Three additive tiers. Start with Tier 1 and unlock the rest as data accumulates.
 |---|---|---|---|
 | **Tier 1** | Memory Harness | 9 | Bi-temporal episodic memory. Every session ingested automatically. Hybrid BM25 + vector semantic search. Date filtering. Numeric/IP search. |
 | **Tier 2** | StingerVault | 19 | Autonomous distillation of sessions into structured self-knowledge: identity, domain, methodology, preferences, constraints. External document ingestion (URL, PDF, YouTube). |
-| **Tier 3** | Gradient | 24 | Synchronous alignment evaluation before every response. Drift detection. Correction engine. Starts in observe-only mode. |
+| **Tier 3** | Gradient | 27 | Synchronous alignment evaluation before every response. Drift detection. Correction engine. 3 new observability tools (v0.6). Starts in observe-only mode. |
 
 ---
 
@@ -69,6 +69,9 @@ OPENAI_API_KEY=sk-...
 
 # FalkorDB password — leave blank for local dev (simplest)
 FALKORDB_PASSWORD=
+
+# PostgreSQL password (used by docker compose)
+POSTGRES_PASSWORD=your_postgres_password
 ```
 
 > **⚠️ Password gotcha:** If you set `FALKORDB_PASSWORD`, do NOT use `#` in it.
@@ -93,7 +96,7 @@ docker compose up -d
 python -m openstinger.mcp.server
 ```
 
-**All tiers** (memory + vault + alignment, 24 tools):
+**All tiers** (memory + vault + alignment, 27 tools):
 ```bash
 python -m openstinger.gradient.mcp.server
 ```
@@ -105,7 +108,7 @@ In your MCP client config (e.g. `mcporter.json`):
 {
   "mcpServers": {
     "openstinger": {
-      "baseUrl": "http://localhost:8765/sse"
+      "baseUrl": "http://localhost:8766/sse"
     }
   }
 }
@@ -158,9 +161,18 @@ Set `OPENAI_API_KEY` in `.env` to your Novita (or other) API key.
 
 `vault_status` · `vault_sync_now` · `vault_stats` · `vault_promote_now` · `vault_note_list` · `vault_note_get` · `knowledge_ingest` · `namespace_create` · `namespace_list` · `namespace_archive`
 
-### Tier 3 — Gradient (+5 tools, 24 total)
+### Tier 3 — Gradient (+8 tools, 27 total)
 
-`gradient_status` · `gradient_alignment_score` · `gradient_drift_status` · `gradient_alignment_log` · `gradient_alert`
+| Tool | What it does |
+|---|---|
+| `gradient_status` | Gradient health, profile state, observe_only flag |
+| `gradient_alignment_score` | Evaluate a response — returns score + verdict |
+| `gradient_drift_status` | Rolling window alignment stats |
+| `gradient_alignment_log` | Recent alignment evaluation log |
+| `gradient_alert` | Current drift alert status |
+| `ops_status` ⭐ | Single-call dashboard: vault notes + gradient pass rate + drift state |
+| `gradient_history` ⭐ | Last N alignment verdicts with scores from PostgreSQL |
+| `drift_status` ⭐ | Behavioral drift window history from PostgreSQL |
 
 ---
 
@@ -180,7 +192,7 @@ memory_search(query="bot crash", search_type="episodes", after_date="2026-02-15"
 
 ### Numeric and IP address search (new in v0.4)
 ```python
-memory_search(query="167.99.222.10")        # IP address — CONTAINS fallback auto-triggered
+memory_search(query="192.168.1.100")        # IP address — CONTAINS fallback auto-triggered
 memory_search(query="$50 funding round")    # prices/amounts
 memory_search(query="wallet 0xDeadBeef")    # hex/wallet addresses
 ```
@@ -200,15 +212,17 @@ OpenStinger runs beside your agent — never inside it. Your agent calls MCP too
 ```
 Your Agent (any MCP-compatible runtime)
     │
-    │  Model Context Protocol · SSE · http://localhost:8765/sse
+    │  Model Context Protocol · SSE · http://localhost:8766/sse
     ▼
 OpenStinger MCP Server (Python process on your machine)
-    ├── Tier 1  memory_query · memory_add · memory_search ········  9 tools
-    ├── Tier 2  vault_promote_now · knowledge_ingest · namespace_* +10 tools
-    └── Tier 3  gradient_alignment_score · gradient_alert ·········  +5 tools
-         │
-         ├── FalkorDB  (graph DB · episodic memory · knowledge vault · vector indexes)
-         └── SQLite    (ingestion jobs · alignment events · agent registry)
+    ├── Tier 1  memory_query · memory_add · memory_search ··········  9 tools
+    ├── Tier 2  vault_promote_now · knowledge_ingest · namespace_*  +10 tools
+    └── Tier 3  gradient_alignment_score · ops_status · drift_status  +8 tools
+         │                                                      ──────────────
+         │                                                      27 tools total
+         ├── FalkorDB    (graph DB · episodic memory · knowledge vault · vectors)
+         ├── PostgreSQL  (ingestion jobs · alignment events · agent registry)
+         └── vault/      (markdown notes · human-editable · SHA-256 synced)
 ```
 
 Session files are read-only. OpenStinger never writes to your agent's files.
@@ -233,11 +247,13 @@ One JSON object per line:
 | URL | Tool | Start command |
 |---|---|---|
 | `http://localhost:3000` | FalkorDB Browser (visual graph) | `docker compose up -d` (auto-starts) |
-| `http://localhost:8001` | Datasette (SQLite inspector) | `datasette .openstinger/openstinger.db --port 8001` |
+| `http://localhost:8080` | Adminer (PostgreSQL inspector) | `docker compose up -d` (auto-starts) |
 
 **FalkorDB Browser login:** host `host.docker.internal` · port `6379` · password: whatever you set in `.env` (blank = no password)
 
-> Use `host.docker.internal` NOT `localhost` — the browser runs inside Docker.
+**Adminer login:** System: `PostgreSQL` · Server: `host.docker.internal` · Username/Password/Database: use values from your `.env` and `config.yaml`
+
+> Use `host.docker.internal` NOT `localhost` — both UIs run inside Docker.
 
 ---
 
@@ -251,7 +267,7 @@ Tier 2  python -m openstinger.scaffold.mcp.server          ← vault activates
 Tier 3  python -m openstinger.gradient.mcp.server          ← alignment activates (observe-only first)
 ```
 
-Each tier includes all lower tiers. Running Tier 3 gives you all 24 tools.
+Each tier includes all lower tiers. Running Tier 3 gives you all 27 tools.
 
 ---
 
@@ -267,8 +283,9 @@ falkordb:
   password: ""                 # leave blank for local dev
 
 operational_db:
-  provider: sqlite             # sqlite (default) or postgresql
-  sqlite_path: ".openstinger/openstinger.db"
+  provider: postgresql            # postgresql (default, v0.6+) | sqlite
+  postgresql_url: "postgresql+asyncpg://your_user:your_password@localhost:5432/your_db"
+  # sqlite_path: ".openstinger/openstinger.db"  # uncomment to use SQLite instead
 
 llm:
   provider: anthropic          # anthropic | openai (for OpenAI-compatible)
@@ -284,6 +301,7 @@ ingestion:
   sessions_dir: "/path/to/sessions"  # REQUIRED: path to your agent's JSONL session files
   session_format: openclaw            # openclaw | simple
   poll_interval_seconds: 10
+  concurrency: 5                      # parallel episode processing (v0.5+)
 
 vault:                              # Tier 2
   classification_interval_seconds: 300
@@ -294,7 +312,7 @@ gradient:                           # Tier 3
 
 mcp:
   transport: sse                    # sse (recommended) | stdio
-  tcp_port: 8765                    # change if port is taken (try 8766, 8767...)
+  tcp_port: 8766                    # default production port (8765 may be reserved on Windows)
 ```
 
 ---

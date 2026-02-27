@@ -1,7 +1,7 @@
 """
 Tier 3 (Gradient) MCP server.
 
-Routes all 15 Tier 1+2 tools unchanged + adds 5 Gradient tools + 3 ops tools = 23 total.
+Routes all 19 Tier 1+2 tools unchanged + adds 8 Gradient tools (5 original + 3 v0.6) = 27 total.
 
 Gradient tools:
   gradient_status         — gradient health, profile state, observe_only flag
