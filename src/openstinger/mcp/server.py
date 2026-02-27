@@ -48,6 +48,7 @@ from openstinger.temporal.engine import TemporalEngine
 from openstinger.temporal.entity_registry import EntityRegistry
 from openstinger.temporal.falkordb_driver import wait_for_falkordb
 from openstinger.temporal.openai_embedder import OpenAIEmbedder
+from openstinger.storage.embedding_cache import CachedEmbedder, EmbeddingCache
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +71,11 @@ TOOL_SCHEMAS: list[types.Tool] = [
     ),
     types.Tool(
         name="memory_query",
-        description="Hybrid search (BM25 + vector) across episodes, entities, and facts.",
+        description=(
+            "Hybrid semantic search (BM25 + vector) across episodes, entities, and facts. "
+            "Returns a unified 'ranked' list with normalized scores (all comparable 0.0–1.0). "
+            "Use after_date / before_date to restrict to a time window (e.g. after_date='2026-02')."
+        ),
         inputSchema={
             "type": "object",
             "properties": {
@@ -78,13 +83,28 @@ TOOL_SCHEMAS: list[types.Tool] = [
                 "limit": {"type": "integer", "default": 10},
                 "include_expired": {"type": "boolean", "default": False},
                 "agent_namespace": {"type": "string"},
+                "after_date": {
+                    "type": "string",
+                    "description": "ISO date filter — only return episodes on/after this date. Format: YYYY-MM-DD or YYYY-MM",
+                },
+                "before_date": {
+                    "type": "string",
+                    "description": "ISO date filter — only return episodes on/before this date. Format: YYYY-MM-DD or YYYY-MM",
+                },
             },
             "required": ["query"],
         },
     ),
     types.Tool(
         name="memory_search",
-        description="BM25 full-text search across episodes, entities, or facts.",
+        description=(
+            "Smart keyword search across episodes, entities, or facts. "
+            "Automatically handles: numeric data (IP addresses, prices, wallet addresses), "
+            "temporal queries (month/year searches like 'February 2026'), "
+            "fuzzy matching (typos — 'Qinn' finds 'Quinn' via vector fallback). "
+            "Falls back from BM25 → vector → CONTAINS if primary search returns no results. "
+            "Supports date filtering via after_date / before_date."
+        ),
         inputSchema={
             "type": "object",
             "properties": {
@@ -96,6 +116,14 @@ TOOL_SCHEMAS: list[types.Tool] = [
                 },
                 "limit": {"type": "integer", "default": 10},
                 "agent_namespace": {"type": "string"},
+                "after_date": {
+                    "type": "string",
+                    "description": "ISO date — only return results on/after this date. Format: YYYY-MM-DD or YYYY-MM",
+                },
+                "before_date": {
+                    "type": "string",
+                    "description": "ISO date — only return results on/before this date. Format: YYYY-MM-DD or YYYY-MM",
+                },
             },
             "required": ["query"],
         },
@@ -253,6 +281,14 @@ class OpenStingerServer:
             base_url=cfg.llm.embedding_base_url or None,
         )
 
+        # v0.5: wrap embedder with SQLite-backed cache to eliminate redundant
+        # API calls during vault re-syncs and repeated entity embedding.
+        _cache_db = cfg.resolved_sqlite_path().parent / "embed_cache.db"
+        _embed_cache = EmbeddingCache(db_path=_cache_db, model_name=cfg.llm.embedding_model)
+        await _embed_cache.init()
+        self.embedder = CachedEmbedder(embedder=self.embedder, cache=_embed_cache)
+        logger.info("EmbeddingCache initialised: %s", _cache_db)
+
         # 4. Entity registry + temporal engine
         self.entity_registry = EntityRegistry(self.db)
         await self.entity_registry.warmup()
@@ -287,6 +323,7 @@ class OpenStingerServer:
             poll_interval=cfg.ingestion.poll_interval_seconds,
             chunk_size=cfg.ingestion.chunk_size,
             session_format=cfg.ingestion.session_format,
+            concurrency=cfg.ingestion.concurrency,
         )
 
         logger.info("OpenStinger ready: namespace=%s", cfg.agent_namespace)

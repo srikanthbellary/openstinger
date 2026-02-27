@@ -36,6 +36,14 @@ from openstinger.mcp.tools.memory_tools import (
 from openstinger.scaffold.vault_engine import VaultEngine
 from openstinger.scaffold.vault_sync import VaultSyncEngine
 
+# APScheduler is optional — fall back to raw asyncio loops if not installed
+try:
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler as _APScheduler
+    _HAS_APSCHEDULER = True
+except ImportError:
+    _HAS_APSCHEDULER = False
+    _APScheduler = None  # type: ignore[assignment,misc]
+
 logger = logging.getLogger(__name__)
 
 # Tier 1 tools (pass-through)
@@ -86,13 +94,75 @@ TIER2_TOOLS = [
             "required": ["uuid"],
         },
     ),
+    types.Tool(
+        name="knowledge_ingest",
+        description=(
+            "Ingest an external document (URL, PDF, YouTube video, or plain text) "
+            "into the knowledge graph as searchable chunks."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "source": {
+                    "type": "string",
+                    "description": "URL, file path, YouTube URL/ID, or raw text content",
+                },
+                "source_type": {
+                    "type": "string",
+                    "enum": ["url", "pdf", "youtube", "text", "auto"],
+                    "default": "auto",
+                    "description": "Source type — 'auto' detects from source string",
+                },
+                "title": {
+                    "type": "string",
+                    "description": "Optional document title override",
+                },
+            },
+            "required": ["source"],
+        },
+    ),
+    types.Tool(
+        name="namespace_list",
+        description="List all registered agent namespaces.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "include_archived": {"type": "boolean", "default": False},
+            },
+        },
+    ),
+    types.Tool(
+        name="namespace_create",
+        description="Create a new named agent namespace with its own temporal graph.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Human-readable agent name (e.g. 'research-agent')",
+                },
+            },
+            "required": ["name"],
+        },
+    ),
+    types.Tool(
+        name="namespace_archive",
+        description="Archive a named agent namespace (soft-delete, data preserved).",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "agent_id": {"type": "string", "description": "UUID of the agent to archive"},
+            },
+            "required": ["agent_id"],
+        },
+    ),
 ]
 
 ALL_TOOLS = TIER1_TOOLS + TIER2_TOOLS
 
 
 class ScaffoldServer:
-    """Tier 2 MCP server wrapping Tier 1 + adding vault tools."""
+    """Tier 2 MCP server wrapping Tier 1 + adding vault + knowledge + namespace tools."""
 
     def __init__(self, cfg: Any) -> None:
         self.cfg = cfg
@@ -101,6 +171,7 @@ class ScaffoldServer:
         self.vault_engine: Any = None
         self.vault_sync: Any = None
         self._last_sync_at: int = 0
+        self._scheduler: Any = None   # APScheduler or None
         self._register_handlers()
 
     def _register_handlers(self) -> None:
@@ -133,6 +204,20 @@ class ScaffoldServer:
             case "vault_note_get":
                 note = await self.vault_engine.get_note(args["uuid"])
                 return note or {"found": False}
+            case "knowledge_ingest":
+                return await self._knowledge_ingest(
+                    source=args["source"],
+                    source_type=args.get("source_type", "auto"),
+                    title=args.get("title"),
+                )
+            case "namespace_list":
+                return await self._namespace_list(
+                    include_archived=args.get("include_archived", False)
+                )
+            case "namespace_create":
+                return await self._namespace_create(name=args["name"])
+            case "namespace_archive":
+                return await self._namespace_archive(agent_id=args["agent_id"])
             case _:
                 return {"error": f"Unknown tool: {name}"}
 
@@ -185,31 +270,137 @@ class ScaffoldServer:
             agent_namespace=cfg.agent_namespace,
         )
 
-        # Start background cron tasks
-        asyncio.create_task(self._classification_loop())
-        asyncio.create_task(self._sync_loop())
+        # Start background scheduling (APScheduler if available, else raw asyncio loops)
+        self._start_scheduler()
 
-        logger.info("Scaffold server ready: namespace=%s", cfg.agent_namespace)
+        logger.info(
+            "Scaffold server ready: namespace=%s scheduler=%s",
+            cfg.agent_namespace,
+            "apscheduler" if _HAS_APSCHEDULER else "asyncio",
+        )
+
+    def _start_scheduler(self) -> None:
+        """Start background classification + sync jobs."""
+        classify_interval = self.cfg.vault.classification_interval_seconds
+        sync_interval = self.cfg.vault.sync_interval_seconds
+
+        if _HAS_APSCHEDULER:
+            self._scheduler = _APScheduler()
+            self._scheduler.add_job(
+                self._run_classification,
+                trigger="interval",
+                seconds=classify_interval,
+                id="vault_classification",
+                misfire_grace_time=300,
+                coalesce=True,
+                max_instances=1,
+            )
+            self._scheduler.add_job(
+                self._run_sync,
+                trigger="interval",
+                seconds=sync_interval,
+                id="vault_sync",
+                misfire_grace_time=300,
+                coalesce=True,
+                max_instances=1,
+            )
+            self._scheduler.start()
+            logger.info(
+                "APScheduler started: classify every %ds, sync every %ds",
+                classify_interval, sync_interval,
+            )
+        else:
+            # Fallback: raw asyncio loops (functional but no misfire recovery)
+            asyncio.create_task(self._classification_loop())
+            asyncio.create_task(self._sync_loop())
+            logger.info(
+                "Asyncio loops started: classify every %ds, sync every %ds",
+                classify_interval, sync_interval,
+            )
+
+    async def _run_classification(self) -> None:
+        """APScheduler job: run classification cycle."""
+        try:
+            await self.vault_engine.run_classification_cycle()
+        except Exception as exc:
+            logger.error("Classification cycle error: %s", exc)
+
+    async def _run_sync(self) -> None:
+        """APScheduler job: run vault sync."""
+        try:
+            import time
+            await self.vault_sync.sync()
+            self._last_sync_at = int(time.time())
+        except Exception as exc:
+            logger.error("Vault sync error: %s", exc)
 
     async def _classification_loop(self) -> None:
+        """Asyncio fallback loop for classification."""
         while True:
             await asyncio.sleep(self.cfg.vault.classification_interval_seconds)
-            try:
-                await self.vault_engine.run_classification_cycle()
-            except Exception as exc:
-                logger.error("Classification cycle error: %s", exc)
+            await self._run_classification()
 
     async def _sync_loop(self) -> None:
+        """Asyncio fallback loop for vault sync."""
         while True:
             await asyncio.sleep(self.cfg.vault.sync_interval_seconds)
-            try:
-                import time
-                await self.vault_sync.sync()
-                self._last_sync_at = int(time.time())
-            except Exception as exc:
-                logger.error("Vault sync error: %s", exc)
+            await self._run_sync()
+
+    async def _knowledge_ingest(
+        self, source: str, source_type: str = "auto", title: str | None = None
+    ) -> dict:
+        """Ingest an external document into the knowledge graph."""
+        from openstinger.knowledge.ingest import ingest
+        try:
+            result = await ingest(
+                source=source,
+                agent_namespace=self.cfg.agent_namespace,
+                driver=self.tier1.driver,
+                embedder=self.tier1.embedder,
+                source_type=source_type,
+                title=title,
+            )
+            return {
+                "document_uuid": result.document_uuid,
+                "chunk_count": result.chunk_count,
+                "source_type": result.source_type,
+                "duration_ms": result.duration_ms,
+                "error": result.error,
+            }
+        except Exception as exc:
+            logger.error("knowledge_ingest error: %s", exc)
+            return {"error": str(exc)}
+
+    async def _namespace_list(self, include_archived: bool = False) -> dict:
+        """List registered agent namespaces."""
+        from openstinger.agents.namespace import list_namespaces
+        records = await list_namespaces(
+            db=self.tier1.db, include_archived=include_archived
+        )
+        return {"namespaces": [r.to_dict() for r in records]}
+
+    async def _namespace_create(self, name: str) -> dict:
+        """Create a new agent namespace."""
+        from openstinger.agents.namespace import create_namespace
+        record = await create_namespace(
+            name=name,
+            db=self.tier1.db,
+            driver=self.tier1.driver,
+        )
+        return record.to_dict()
+
+    async def _namespace_archive(self, agent_id: str) -> dict:
+        """Archive an agent namespace."""
+        from openstinger.agents.namespace import archive_namespace
+        success = await archive_namespace(agent_id=agent_id, db=self.tier1.db)
+        return {"archived": success, "agent_id": agent_id}
 
     async def shutdown(self) -> None:
+        if self._scheduler is not None:
+            try:
+                self._scheduler.shutdown(wait=False)
+            except Exception:
+                pass
         await self.tier1.shutdown()
 
 

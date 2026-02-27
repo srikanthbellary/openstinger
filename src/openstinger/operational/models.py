@@ -57,6 +57,31 @@ class Base(DeclarativeBase):
 
 
 # ---------------------------------------------------------------------------
+# agent_registry  (added in 0.4.0 — namespace management)
+# ---------------------------------------------------------------------------
+
+class AgentRegistry(Base):
+    """One row per registered named agent namespace."""
+    __tablename__ = "agent_registry"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    agent_id: Mapped[str] = mapped_column(String(36), unique=True, nullable=False)
+    agent_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    temporal_graph: Mapped[str] = mapped_column(String(128), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), default="active")
+    # active | archived
+    config_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    last_active: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+
+    def __init__(self, **kwargs: object) -> None:
+        kwargs.setdefault("status", "active")
+        kwargs.setdefault("created_at", _now())
+        kwargs.setdefault("last_active", _now())
+        super().__init__(**kwargs)
+
+
+# ---------------------------------------------------------------------------
 # ingestion_jobs
 # ---------------------------------------------------------------------------
 

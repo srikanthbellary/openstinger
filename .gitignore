@@ -39,3 +39,6 @@ Thumbs.db
 
 # Internal development documents — not for public repo
 docs/
+
+# Scratch / temporary development utilities — never commit
+temp/
