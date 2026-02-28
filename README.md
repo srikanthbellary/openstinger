@@ -387,6 +387,73 @@ pytest tests/ -m tier3
 
 ---
 
+## Memory Portability
+
+> **Your agent changes. The memory doesn't have to.**
+
+OpenStinger stores everything in two Docker volumes:
+
+- `falkordb_data` — the temporal knowledge graph: all entities, relationships, episodes
+- `postgres_data` — the operational database: vault notes, alignment events, registry
+
+Both are standard Docker volumes. Export, move, import — full memory transfers to a new host, a new runtime, or a new cloud provider. The agent framework is irrelevant because memory is decoupled from it.
+
+### Backup
+
+```bash
+# FalkorDB snapshot (atomic — run first)
+docker exec openstinger_falkordb redis-cli BGSAVE
+
+# Export both volumes
+docker run --rm -v openstinger_falkordb_data:/data -v $(pwd):/backup \
+  alpine tar czf /backup/falkordb.tar.gz /data
+
+docker run --rm -v openstinger_postgres_data:/data -v $(pwd):/backup \
+  alpine tar czf /backup/postgres.tar.gz /data
+```
+
+### Restore on any host
+
+```bash
+docker run --rm -v openstinger_falkordb_data:/data -v $(pwd):/backup \
+  alpine tar xzf /backup/falkordb.tar.gz -C /
+
+docker run --rm -v openstinger_postgres_data:/data -v $(pwd):/backup \
+  alpine tar xzf /backup/postgres.tar.gz -C /
+
+docker compose up -d   # starts with full memory intact
+```
+
+### What this enables
+
+| Scenario | Result |
+|---|---|
+| **Agent migration** | Move from Mac Mini to cloud VM — full memory, vault, alignment history preserved |
+| **Runtime swap** | Switch from OpenClaw to NanoClaw — OpenStinger memory transfers completely |
+| **Agent cloning** | Snapshot production into dev — test against real accumulated knowledge |
+| **Multi-agent bootstrap** | Clone a senior agent's vault into a new specialist — starts with wisdom, not zero |
+| **Emergency recovery** | Host fails — restore volumes on any new machine, agent resumes |
+| **Memory rollback** | Snapshot before risky vault changes — restore if classification results degrade |
+
+No other *Claw memory system separates memory from the runtime cleanly enough to make this possible.
+
+---
+
+## Cloud Deployment
+
+OpenStinger runs anywhere Python and Docker run. Deploy on a cloud VM and all your agents — on-prem, edge devices, other cloud instances — connect via MCP SSE.
+
+```
+[Mac Mini agent]         ──HTTP SSE──►
+[EC2 agent]              ──HTTP SSE──►  OpenStinger (cloud VM · port 8766)
+[PicoClaw on $10 device] ──HTTP SSE──►
+[NanoClaw swarm agent]   ──HTTP SSE──►
+```
+
+For remote agents that generate session files locally, use the `memory_add` MCP tool to write episodes directly — no local file path required.
+
+---
+
 ## License
 
 MIT — see [LICENSE](LICENSE)
