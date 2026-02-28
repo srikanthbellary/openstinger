@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <strong>Persistent memory, self-knowledge, and alignment for autonomous AI agents.</strong>
+  <strong>One memory layer. Every agent framework.</strong>
 </p>
 
 <p align="center">
@@ -15,9 +15,21 @@
   <a href="https://modelcontextprotocol.io"><img src="https://img.shields.io/badge/MCP-1.26%2B-green?style=for-the-badge" alt="MCP"></a>
 </p>
 
-**OpenStinger** gives autonomous AI agents persistent memory, structured self-knowledge, and alignment evaluation — all exposed as MCP tools the agent calls natively.
+**OpenStinger** is the structured memory and knowledge layer for the *Claw agent ecosystem — and every MCP-compatible agent runtime. One SSE endpoint. 27 tools. Bi-temporal knowledge graph, structured entity registry, autonomous knowledge classification, and a full operational audit trail.
 
-Built on [FalkorDB](https://falkordb.com) (graph + vector database) and [Model Context Protocol](https://modelcontextprotocol.io). No SDK changes to your agent. No vendor lock-in. Works with any MCP-compatible runtime (OpenClaw, Claude Code, etc.).
+Built on [FalkorDB](https://falkordb.com) (graph + vector) and [PostgreSQL](https://postgresql.org) (operational DB), exposed via [Model Context Protocol](https://modelcontextprotocol.io). No SDK changes. No vendor lock-in. If your agent runtime speaks MCP, it already works with OpenStinger.
+
+## Compatible Frameworks
+
+| Framework | MCP | Integration Guide |
+|---|---|---|
+| **OpenClaw** | ✅ via mcporter | [View guide](integrations/OPENCLAW.md) |
+| **Nanobot** | ✅ confirmed Feb 2026 | [View guide](integrations/NANOBOT.md) |
+| **ZeroClaw** | ✅ swappable trait | [View guide](integrations/ZEROCLAW.md) |
+| **NanoClaw** | ✅ Agent SDK native | [View guide](integrations/NANOCLAW.md) |
+| **PicoClaw** | 🔄 in roadmap | [View guide](integrations/PICOCLAW.md) |
+| **Claude Code** | ✅ MCP native | Point at `http://localhost:8766/sse` |
+| **Cursor** | ✅ MCP native | Point at `http://localhost:8766/sse` |
 
 ---
 
@@ -103,7 +115,8 @@ python -m openstinger.gradient.mcp.server
 
 ### 5. Connect your agent
 
-In your MCP client config (e.g. `mcporter.json`):
+OpenStinger speaks MCP over SSE. The config is identical across all supported frameworks:
+
 ```json
 {
   "mcpServers": {
@@ -113,6 +126,8 @@ In your MCP client config (e.g. `mcporter.json`):
   }
 }
 ```
+
+> See [integrations/](integrations/) for framework-specific setup guides (OpenClaw, Nanobot, ZeroClaw, NanoClaw, PicoClaw).
 
 Then your agent can call:
 ```bash
@@ -210,19 +225,20 @@ memory_search(query="Qinn", search_type="entities")
 OpenStinger runs beside your agent — never inside it. Your agent calls MCP tools. OpenStinger reads session files in the background.
 
 ```
-Your Agent (any MCP-compatible runtime)
-    │
-    │  Model Context Protocol · SSE · http://localhost:8766/sse
-    ▼
-OpenStinger MCP Server (Python process on your machine)
-    ├── Tier 1  memory_query · memory_add · memory_search ··········  9 tools
-    ├── Tier 2  vault_promote_now · knowledge_ingest · namespace_*  +10 tools
-    └── Tier 3  gradient_alignment_score · ops_status · drift_status  +8 tools
-         │                                                      ──────────────
-         │                                                      27 tools total
-         ├── FalkorDB    (graph DB · episodic memory · knowledge vault · vectors)
-         ├── PostgreSQL  (ingestion jobs · alignment events · agent registry)
-         └── vault/      (markdown notes · human-editable · SHA-256 synced)
+OpenClaw ──┐
+Nanobot  ──┤
+ZeroClaw ──┼── MCP / SSE · http://localhost:8766/sse
+NanoClaw ──┤
+PicoClaw ──┤        ▼
+Claude Code┘  OpenStinger MCP Server (Python · port 8766)
+               ├── Tier 1  memory_query · memory_add ··········  9 tools
+               ├── Tier 2  vault_promote_now · vault_note_get  +10 tools
+               └── Tier 3  gradient_alignment_score · ops_status +8 tools
+                    │                                     ─────────────────
+                    │                                     27 tools total
+                    ├── FalkorDB    (graph · vectors · episodic memory)
+                    ├── PostgreSQL  (jobs · alignment events · registry)
+                    └── vault/      (notes · SHA-256 synced · auditable)
 ```
 
 Session files are read-only. OpenStinger never writes to your agent's files.
