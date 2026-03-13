@@ -1,70 +1,104 @@
-﻿# OpenStinger + PicoClaw
+# OpenStinger + PicoClaw
 
-PicoClaw is built for edge hardware  routers, cameras, microcontrollers  with a target footprint under 10MB RAM. Local graph databases are architecturally impossible on this hardware. OpenStinger runs on a central server and gives every PicoClaw device persistent, queryable memory without touching the device's footprint.
+PicoClaw is the lightweight, resource-constrained member of the \*Claw ecosystem — designed for edge deployment, low-memory environments, and single-purpose agent runtimes. OpenStinger connects to PicoClaw via MCP/SSE exactly as it does with any other \*Claw variant.
 
 ## What OpenStinger adds to PicoClaw
 
-PicoClaw's hardware constraints mean memory will always be flat files or minimal SQLite on-device. OpenStinger offloads all memory operations to a server:
+PicoClaw deliberately ships without a persistent memory layer to stay lightweight. OpenStinger fills that gap without adding runtime overhead to the PicoClaw process itself — all memory, knowledge, and alignment work runs in a separate Python process.
 
-| PicoClaw alone | PicoClaw + OpenStinger (central) |
-|---|---|
-| Flat file or minimal SQLite | Full bi-temporal knowledge graph |
-| Memory limited by device RAM | Memory limited only by server storage |
-| No cross-device entity awareness | Fleet-wide shared entity registry |
-| No audit trail | Complete operational event log |
-
-**The fleet story:** Run PicoClaw on \ edge devices. Run OpenStinger on a central server. Multiple devices share entity awareness  they collectively build a shared knowledge graph of whatever environment they're monitoring or operating in.
+| Capability | PicoClaw (default) | PicoClaw + OpenStinger |
+|---|---|---|
+| Session memory | None | Full temporal graph (episodes + entities + facts) |
+| Knowledge distillation | None | Autonomous StingerVault classification |
+| Entity deduplication | None | 3-stage: string → MinHash LSH → LLM |
+| Alignment evaluation | None | Gradient behavioral scoring |
+| Memory portability | PicoClaw-only | Any MCP runtime (Tier 1–3) |
 
 ## Setup
 
-### 1. Start OpenStinger on a central server
-
-OpenStinger runs on any machine with Python 3.10+ and Docker. Edge devices connect over the network.
+### 1. Start OpenStinger
 
 ```bash
-python -m openstinger.gradient.mcp.server
+docker compose up -d   # starts FalkorDB, PostgreSQL, Adminer
+python -m openstinger.gradient.mcp.server   # Tier 3 (all 30 tools)
 ```
 
-Expose port 8766 on your central server. Configure firewall as appropriate.
+For Tier 1 only (memory, no vault/gradient):
+```bash
+python -m openstinger.mcp.server
+```
 
-### 2. Connect each PicoClaw device
+### 2. Configure MCP connection in PicoClaw
 
-In each device's MCP client config, point to the central OpenStinger server:
+In PicoClaw's MCP config, add OpenStinger as an SSE connection:
 
 ```json
 {
-  "mcpServers": {
+  "connections": {
     "openstinger": {
-      "url": "http://your-server-ip:8766/sse"
+      "type": "sse",
+      "url": "http://localhost:8766/sse"
     }
   }
 }
 ```
 
-### 3. Assign each device its own namespace
+> If PicoClaw runs inside Docker, use `host.docker.internal` instead of `localhost`.
 
-In `config.yaml` for each device's OpenStinger session ingestion:
+### 3. Configure session ingestion
+
+If PicoClaw writes session files, point OpenStinger at the sessions directory:
 
 ```yaml
-agent_namespace: device-001   # unique per device
+# config.yaml
+ingestion:
+  sessions_dir: "/path/to/picoclaw/sessions"
+  session_format: simple   # PicoClaw uses simple line-by-line JSONL
 ```
 
-Shared entities (locations, devices, events) appear in the shared `entity_registry`. Each device's episodic memory stays isolated in its own namespace graph.
+For lightweight deployments without a sessions directory, use `memory_add` directly from PicoClaw tools to store episodes manually.
 
-## About Tier 3: Gradient
+### 4. Add the OpenStinger skill to your PicoClaw agent
 
-OpenStinger's Tier 3 (Gradient) runs alignment evaluation per-response on the central server — not on the edge device. PicoClaw agents call `gradient_alignment_score` or `ops_status` via MCP; all computation happens server-side.
+Copy the canonical skill template and adapt it for your agent:
 
-> **dE/dt = β(C–D)E** — every response scored against the agent's own evolving baseline. Zero compute on the edge device.
+```bash
+cp /path/to/openstinger/integrations/AGENT_SKILL_TEMPLATE.md \
+   /path/to/picoclaw/workspace/skills/openstinger_skill.md
+```
 
----
+See [AGENT_SKILL_TEMPLATE.md](AGENT_SKILL_TEMPLATE.md) for the full tool reference and usage patterns.
 
-## Integration Mode
+## Recommended Tier for PicoClaw
 
-→ **[Full integration modes guide with config snippets](INTEGRATION_MODES.md)**
+Since PicoClaw targets minimal footprint, **Tier 1** (9 memory tools) is the recommended starting point. Upgrade to Tier 2 or 3 only when vault classification or alignment scoring is needed.
 
-**Recommended for PicoClaw:** **Mode 3 (Exclusive)** is the only viable option. Hardware constraints prevent any local database — OpenStinger on a central server IS the memory system. For a fleet of devices, a single OpenStinger instance with per-device namespaces serves all devices simultaneously.
+| Tier | Server | Tools | Use case |
+|---|---|---|---|
+| Tier 1 | `openstinger.mcp.server` | 11 | Memory only — minimal overhead |
+| Tier 2 | `openstinger.scaffold.mcp.server` | 22 | Memory + StingerVault knowledge distillation |
+| Tier 3 | `openstinger.gradient.mcp.server` | 30 | Full: memory + vault + behavioral alignment |
 
----
+## Verifying the Connection
 
-*For the full OpenStinger setup guide, see the [main README](../README.md).*
+From inside a PicoClaw session, call:
+
+```
+openstinger.ops_status()
+```
+
+A healthy response looks like:
+
+```json
+{
+  "vault": { "active_notes": 12, "last_sync": "2026-03-01T14:22:00Z" },
+  "gradient": { "profile_state": "minimal", "observe_only": true },
+  "drift": { "alert_active": false, "window_mean": 0.87 }
+}
+```
+
+## Notes
+
+- PicoClaw's low-memory design means the OpenStinger MCP server should run as a separate host process (not in the same container/process).
+- The `simple` session format (`session_format: simple`) expects one JSON object per line with at minimum a `content` field and optionally a `timestamp` field.
+- All 30 MCP tools are available regardless of PicoClaw's tier — the tool tier refers to OpenStinger's server startup, not PicoClaw's configuration.

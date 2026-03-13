@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 #   - CREATE VECTOR INDEX name FOR (n:L) ON ...  ✗ named indexes NOT supported
 #   - CALL db.idx.vector.createNodeIndex(...)  ✗ NOT supported (use CREATE VECTOR INDEX)
 #   - CALL db.idx.fulltext.createRelationshipIndex(...)  ✗ NOT supported (skipped)
-TEMPORAL_SCHEMA_QUERIES = [
+_TEMPORAL_SCHEMA_STATIC = [
     # --- Node B-tree indexes ---
     "CREATE INDEX FOR (e:Entity) ON (e.uuid)",
     "CREATE INDEX FOR (e:Entity) ON (e.name)",
@@ -49,21 +49,29 @@ TEMPORAL_SCHEMA_QUERIES = [
     "CREATE FULLTEXT INDEX FOR (ep:Episode) ON (ep.content)",
     # valid_at_human enables date-based BM25 searches ("February 2026", "March 15")
     "CREATE FULLTEXT INDEX FOR (ep:Episode) ON (ep.valid_at_human)",
-    # --- Vector indexes (no named index — FalkorDB only supports unnamed CREATE VECTOR INDEX) ---
-    "CREATE VECTOR INDEX FOR (e:Entity) ON (e.name_embedding) OPTIONS {dimension: 1536, similarityFunction: 'cosine'}",
-    "CREATE VECTOR INDEX FOR (ep:Episode) ON (ep.content_embedding) OPTIONS {dimension: 1536, similarityFunction: 'cosine'}",
-    "CREATE VECTOR INDEX FOR ()-[r:RELATES_TO]-() ON (r.fact_embedding) OPTIONS {dimension: 1536, similarityFunction: 'cosine'}",
 ]
 
-# Knowledge graph: stores vault-derived structured knowledge (Tier 2)
-KNOWLEDGE_SCHEMA_QUERIES = [
+_KNOWLEDGE_SCHEMA_STATIC = [
     "CREATE INDEX FOR (n:Note) ON (n.uuid)",
     "CREATE INDEX FOR (n:Note) ON (n.category)",
     "CREATE INDEX FOR (n:Note) ON (n.agent_namespace)",
     "CREATE INDEX FOR (n:Note) ON (n.stale)",
     "CREATE FULLTEXT INDEX FOR (n:Note) ON (n.content)",
-    "CREATE VECTOR INDEX FOR (n:Note) ON (n.content_embedding) OPTIONS {dimension: 1536, similarityFunction: 'cosine'}",
 ]
+
+
+def _temporal_vector_queries(dim: int) -> list[str]:
+    return [
+        f"CREATE VECTOR INDEX FOR (e:Entity) ON (e.name_embedding) OPTIONS {{dimension: {dim}, similarityFunction: 'cosine'}}",
+        f"CREATE VECTOR INDEX FOR (ep:Episode) ON (ep.content_embedding) OPTIONS {{dimension: {dim}, similarityFunction: 'cosine'}}",
+        f"CREATE VECTOR INDEX FOR ()-[r:RELATES_TO]-() ON (r.fact_embedding) OPTIONS {{dimension: {dim}, similarityFunction: 'cosine'}}",
+    ]
+
+
+def _knowledge_vector_queries(dim: int) -> list[str]:
+    return [
+        f"CREATE VECTOR INDEX FOR (n:Note) ON (n.content_embedding) OPTIONS {{dimension: {dim}, similarityFunction: 'cosine'}}",
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -85,12 +93,14 @@ class FalkorDBDriver:
         password: str = "",
         temporal_graph_name: str = "openstinger_temporal",
         knowledge_graph_name: str = "openstinger_knowledge",
+        vector_dimensions: int = 1536,
     ) -> None:
         self.host = host
         self.port = port
         self.password = password
         self.temporal_graph_name = temporal_graph_name
         self.knowledge_graph_name = knowledge_graph_name
+        self.vector_dimensions = vector_dimensions
 
         self._client: falkordb.FalkorDB | None = None
         self._temporal: falkordb.Graph | None = None
@@ -209,9 +219,12 @@ class FalkorDBDriver:
         """
         Create all indexes and constraints on both graphs.
         Safely ignores 'already exists' errors.
+        Vector index dimensions are sourced from self.vector_dimensions (default 1536).
         """
-        await self._init_graph_schema(self._temporal, TEMPORAL_SCHEMA_QUERIES, "temporal")
-        await self._init_graph_schema(self._knowledge, KNOWLEDGE_SCHEMA_QUERIES, "knowledge")
+        temporal_queries = _TEMPORAL_SCHEMA_STATIC + _temporal_vector_queries(self.vector_dimensions)
+        knowledge_queries = _KNOWLEDGE_SCHEMA_STATIC + _knowledge_vector_queries(self.vector_dimensions)
+        await self._init_graph_schema(self._temporal, temporal_queries, "temporal")
+        await self._init_graph_schema(self._knowledge, knowledge_queries, "knowledge")
 
     async def _init_graph_schema(
         self, graph: falkordb.Graph | None, queries: list[str], label: str
@@ -253,13 +266,14 @@ async def wait_for_falkordb(
     password: str = "",
     timeout_seconds: float = 30.0,
     retry_interval: float = 1.0,
+    vector_dimensions: int = 1536,
 ) -> FalkorDBDriver:
     """
     Block until FalkorDB is reachable, then return a connected driver.
     Raises TimeoutError if not reachable within timeout_seconds.
     """
     deadline = time.monotonic() + timeout_seconds
-    driver = FalkorDBDriver(host=host, port=port, password=password)
+    driver = FalkorDBDriver(host=host, port=port, password=password, vector_dimensions=vector_dimensions)
 
     while True:
         try:

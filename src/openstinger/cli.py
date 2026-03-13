@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Optional
@@ -59,6 +60,13 @@ if _HAS_CLICK:
     # openstinger-cli init
     # -----------------------------------------------------------------------
 
+    # Known Ollama embedding models with their native output dimensions
+    _OLLAMA_MODEL_DIMS: dict[str, int] = {
+        "nomic-embed-text": 768,
+        "mxbai-embed-large": 1024,
+        "all-minilm": 384,
+    }
+
     @cli.command()
     @click.option("--config", default="config.yaml", help="Path to write config template")
     @click.option("--env", default=".env", help="Path to write .env")
@@ -90,7 +98,7 @@ if _HAS_CLICK:
         if namespace is None:
             namespace = click.prompt("Agent namespace", default=agent_name)
 
-        # --- Provider ---
+        # --- LLM Provider ---
         if provider is None:
             provider = click.prompt(
                 "LLM provider",
@@ -102,6 +110,38 @@ if _HAS_CLICK:
         if api_key is None:
             key_label = "ANTHROPIC_API_KEY" if provider == "anthropic" else "OPENAI_API_KEY"
             api_key = click.prompt(f"{key_label}", hide_input=True, default="", show_default=False)
+
+        # --- Embedding provider (v0.8: Ollama option) ---
+        embed_provider = click.prompt(
+            "\nEmbedding provider",
+            type=click.Choice(["cloud", "ollama"]),
+            default="cloud",
+        )
+        ollama_host = "http://localhost:11434"
+        embedding_model = "text-embedding-3-small"
+        vector_dimensions = 1536
+
+        if embed_provider == "ollama":
+            ollama_host = click.prompt("Ollama host", default="http://localhost:11434")
+            preset_choice = click.prompt(
+                "Embedding model",
+                type=click.Choice(["nomic-embed-text", "mxbai-embed-large", "all-minilm", "custom"]),
+                default="nomic-embed-text",
+            )
+            if preset_choice == "custom":
+                embedding_model = click.prompt("Model name")
+                vector_dimensions = click.prompt("Output dimensions", type=int)
+            else:
+                embedding_model = preset_choice
+                vector_dimensions = _OLLAMA_MODEL_DIMS[preset_choice]
+
+            click.echo(f"\n  Ollama embeddings: {embedding_model}  ({vector_dimensions}d)")
+            click.echo("  WARNING: If you change embedding models later, you must wipe and")
+            click.echo("  re-create the FalkorDB indices (vector dimensions are not compatible")
+            click.echo("  across models). Run: docker compose down -v && docker compose up -d")
+        else:
+            embedding_model = "text-embedding-3-small"
+            vector_dimensions = 1536
 
         # --- Profile dirs (v0.7 AgentProfileIngester) ---
         profile_dirs: list[str] = list(profile_dir)
@@ -124,7 +164,7 @@ if _HAS_CLICK:
         # --- Write .env ---
         env_path = Path(env)
         if not env_path.exists():
-            _write_env_file(env_path, provider, api_key, falkordb_pass, postgres_pass)
+            _write_env_file(env_path, provider, api_key, falkordb_pass, postgres_pass, embed_provider)
             click.echo(f"\n  .env     {env_path}  ✓  (passwords auto-generated)")
         else:
             click.echo(f"\n  .env     {env_path}  (already exists — skipped)")
@@ -132,7 +172,13 @@ if _HAS_CLICK:
         # --- Write config ---
         config_path = Path(config)
         if not config_path.exists():
-            _write_config_template(config_path, agent_name, namespace, profile_dirs)
+            _write_config_template(
+                config_path, agent_name, namespace, profile_dirs,
+                embed_provider=embed_provider,
+                embedding_model=embedding_model,
+                vector_dimensions=vector_dimensions,
+                ollama_host=ollama_host,
+            )
             click.echo(f"  config   {config_path}  ✓")
         else:
             click.echo(f"  config   {config_path}  (already exists — skipped)")
@@ -411,6 +457,127 @@ if _HAS_CLICK:
         """Show vault stats (note counts by category)."""
         asyncio.run(_vault_status(config))
 
+    @vault.command("import")
+    @click.option("--config", default="config.yaml", help="Path to config file")
+    @click.option("--dir", "source_dir", required=True, help="Directory containing .md files to import")
+    @click.option("--recursive", is_flag=True, default=False, help="Recurse into subdirectories")
+    @click.option("--category", default=None, help="Override category for all imported notes (default: infer from subdir)")
+    def vault_import(config: str, source_dir: str, recursive: bool, category: Optional[str]) -> None:
+        """Bulk import .md files into the vault (idempotent — skips unchanged files)."""
+        asyncio.run(_vault_import(config, source_dir, recursive, category))
+
+    async def _vault_import(config_path: str, source_dir: str, recursive: bool, category_override: Optional[str]) -> None:
+        from openstinger.config import load_config
+        from openstinger.temporal.falkordb_driver import wait_for_falkordb
+        from openstinger.temporal.openai_embedder import OpenAIEmbedder
+        from openstinger.storage.embedding_cache import CachedEmbedder, EmbeddingCache
+        from openstinger.operational.adapter import create_adapter
+        from openstinger.scaffold.vault_engine import VaultEngine
+
+        cfg = load_config(config_path if Path(config_path).exists() else None)
+        source = Path(source_dir).expanduser().resolve()
+
+        if not source.exists():
+            click.echo(f"ERROR: directory not found: {source}", err=True)
+            return
+
+        pattern = "**/*.md" if recursive else "*.md"
+        md_files = sorted(source.glob(pattern))
+
+        if not md_files:
+            click.echo(f"No .md files found in {source}")
+            return
+
+        click.echo(f"Found {len(md_files)} .md file(s) in {source}")
+
+        driver = await wait_for_falkordb(
+            cfg.falkordb.host, cfg.falkordb.port, cfg.falkordb.password,
+            vector_dimensions=cfg.falkordb.vector_dimensions,
+        )
+        await driver.init_schema()
+
+        db = create_adapter(
+            provider=cfg.operational_db.provider,
+            sqlite_path=cfg.resolved_sqlite_path(),
+            postgresql_url=cfg.operational_db.postgresql_url,
+        )
+        await db.init()
+
+        if cfg.llm.embedding_provider == "ollama":
+            raw_embedder = OpenAIEmbedder(
+                api_key="ollama",
+                model=cfg.llm.embedding_model,
+                dimensions=cfg.falkordb.vector_dimensions,
+                base_url=f"{cfg.llm.ollama_host}/v1",
+                skip_dimensions=True,
+            )
+        else:
+            raw_embedder = OpenAIEmbedder(
+                api_key=os.environ.get("OPENAI_API_KEY"),
+                model=cfg.llm.embedding_model,
+                dimensions=cfg.falkordb.vector_dimensions,
+                base_url=cfg.llm.embedding_base_url or None,
+            )
+
+        _cache_db = cfg.resolved_sqlite_path().parent / "embed_cache.db"
+        _embed_cache = EmbeddingCache(db_path=_cache_db, model_name=cfg.llm.embedding_model)
+        await _embed_cache.init()
+        embedder = CachedEmbedder(embedder=raw_embedder, cache=_embed_cache)
+
+        vault_dir = cfg.resolved_vault_dir()
+        vault_engine = VaultEngine(
+            driver=driver,
+            db=db,
+            embedder=embedder,
+            agent_namespace=cfg.agent_namespace,
+            vault_dir=vault_dir,
+        )
+
+        imported = 0
+        skipped = 0
+        errors = 0
+
+        for md_file in md_files:
+            try:
+                content = md_file.read_text(encoding="utf-8").strip()
+                if not content:
+                    skipped += 1
+                    continue
+
+                if category_override:
+                    cat = category_override
+                else:
+                    rel = md_file.relative_to(source)
+                    cat = rel.parts[0] if len(rel.parts) > 1 else "notes"
+                    known = {"identity", "domain", "methodology", "preference", "constraint", "notes"}
+                    if cat not in known:
+                        cat = "notes"
+
+                existing_hash = await db.get_vault_checksum(str(md_file))
+                import hashlib
+                current_hash = hashlib.sha256(content.encode()).hexdigest()
+
+                if existing_hash and existing_hash == current_hash:
+                    skipped += 1
+                    continue
+
+                await vault_engine._create_note({
+                    "category": cat,
+                    "content": content,
+                    "confidence": 0.85,
+                })
+                await db.upsert_vault_checksum(str(md_file), current_hash)
+                imported += 1
+                click.echo(f"  [{cat}] {md_file.name}")
+            except Exception as exc:
+                errors += 1
+                click.echo(f"  ERROR: {md_file.name} — {exc}", err=True)
+
+        await driver.close()
+        await db.close()
+
+        click.echo(f"\nDone: {imported} imported, {skipped} skipped, {errors} errors")
+
     async def _vault_status(config_path: str) -> None:
         from openstinger.config import load_config
         from openstinger.temporal.falkordb_driver import wait_for_falkordb
@@ -492,6 +659,10 @@ if _HAS_CLICK:
         agent_name: str = "my-agent",
         agent_namespace: str = "default",
         profile_dirs: list[str] | None = None,
+        embed_provider: str = "cloud",
+        embedding_model: str = "text-embedding-3-small",
+        vector_dimensions: int = 1536,
+        ollama_host: str = "http://localhost:11434",
     ) -> None:
         profile_dirs = profile_dirs or []
         if profile_dirs:
@@ -505,6 +676,21 @@ if _HAS_CLICK:
                 "#     - /path/to/your/agent/workspace   "
                 "# v0.7: auto-seeds vault from SKILL.md, SOUL.md, AGENTS.md etc.\n"
             )
+
+        if embed_provider == "ollama":
+            llm_embed_block = (
+                f"  embedding_model: {embedding_model}\n"
+                "  embedding_provider: ollama\n"
+                f"  ollama_host: {ollama_host}\n"
+            )
+            falkordb_dims_line = f"  vector_dimensions: {vector_dimensions}\n"
+        else:
+            llm_embed_block = (
+                f"  embedding_model: {embedding_model}\n"
+                "  embedding_provider: openai\n"
+            )
+            falkordb_dims_line = f"  vector_dimensions: {vector_dimensions}\n"
+
         path.write_text(
             "# OpenStinger configuration\n"
             "# Generated by: openstinger-cli init\n\n"
@@ -514,17 +700,17 @@ if _HAS_CLICK:
             + "\nfalkordb:\n"
             "  host: localhost\n"
             "  port: 6379\n"
-            "  password: ''\n\n"
-            "operational_db:\n"
+            "  password: ''\n"
+            + falkordb_dims_line
+            + "\noperational_db:\n"
             "  provider: sqlite\n"
             "  sqlite_path: .openstinger/openstinger.db\n\n"
             "llm:\n"
             "  provider: anthropic\n"
             "  model: claude-sonnet-4-6\n"
             "  fast_model: claude-haiku-4-5-20251001\n"
-            "  embedding_model: text-embedding-3-small\n"
-            "  embedding_provider: openai\n\n"
-            "mcp:\n"
+            + llm_embed_block
+            + "\nmcp:\n"
             "  transport: stdio\n"
             "  tcp_port: 8765\n\n"
             "vault:\n"
@@ -543,17 +729,25 @@ if _HAS_CLICK:
         api_key: str,
         falkordb_pass: str,
         postgres_pass: str,
+        embed_provider: str = "cloud",
     ) -> None:
         """Write a fully populated .env with real generated passwords."""
         anthropic_key = api_key if provider == "anthropic" else ""
         openai_key = api_key if provider in ("openai", "novita", "deepseek") else ""
+        if embed_provider == "ollama":
+            embed_note = "# Embeddings: Ollama (local) — no API key needed for embeddings\n"
+            openai_embed_line = "OPENAI_API_KEY=ollama    # placeholder required by client; Ollama ignores it\n"
+        else:
+            embed_note = ""
+            openai_embed_line = f"OPENAI_API_KEY={openai_key}    # required for cloud embedding model\n"
         path.write_text(
             "# OpenStinger environment — generated by: openstinger-cli init\n"
             "# Do not commit this file.\n\n"
             "# --- LLM ---\n"
             f"ANTHROPIC_API_KEY={anthropic_key}\n"
-            f"OPENAI_API_KEY={openai_key}    # required for text-embedding-3-small\n\n"
-            "# --- FalkorDB (graph + vector store) ---\n"
+            + embed_note
+            + openai_embed_line
+            + "\n# --- FalkorDB (graph + vector store) ---\n"
             "FALKORDB_HOST=localhost\n"
             "FALKORDB_PORT=6379\n"
             f"FALKORDB_PASSWORD={falkordb_pass}\n\n"

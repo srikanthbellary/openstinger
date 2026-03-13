@@ -49,7 +49,7 @@ ingestion:
 ### What happens
 
 - Your agent's existing memory tools (`memory_search`, `memory_get`, etc.) keep working untouched
-- OpenStinger's 28 tools are available alongside them
+- OpenStinger's 30 tools are available alongside them
 - OpenStinger ingests session files in the background and builds its knowledge graph
 - You can call `memory_query` or `memory_search` from OpenStinger at any time
 - Both systems accumulate history independently

@@ -1,7 +1,7 @@
 """
 Tier 2 (Scaffold) MCP server.
 
-Routes all 9 Tier 1 tools unchanged + adds 11 new Scaffold tools = 20 total.
+Routes all 11 Tier 1 tools unchanged + adds 11 new Scaffold tools = 22 total.
 
 New tools:
   vault_status      — vault health and last sync time

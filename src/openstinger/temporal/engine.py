@@ -544,6 +544,137 @@ class TemporalEngine:
         )
         return rows[0] if rows else None
 
+    async def delete_episode(self, episode_uuid: str) -> dict[str, Any]:
+        """
+        Permanently delete an episode and prune orphaned entities.
+
+        Steps:
+          1. Verify the episode exists.
+          2. DETACH DELETE the Episode node (removes all its relationships).
+          3. Remove Entity nodes that now have no MENTIONS connections at all.
+
+        Returns a dict with deleted status and counts.
+        """
+        existing = await self.get_episode(episode_uuid)
+        if not existing:
+            return {"deleted": False, "uuid": episode_uuid, "reason": "not found"}
+
+        await self.driver.query_temporal(
+            "MATCH (ep:Episode {uuid: $uuid}) DETACH DELETE ep",
+            {"uuid": episode_uuid},
+        )
+
+        orphan_rows = await self.driver.query_temporal(
+            """
+            MATCH (e:Entity)
+            WHERE NOT EXISTS((e)<-[:MENTIONS]-())
+            RETURN e.uuid AS uuid
+            """,
+            {},
+        )
+        entities_pruned = len(orphan_rows)
+        if orphan_rows:
+            orphan_uuids = [r["uuid"] for r in orphan_rows]
+            await self.driver.query_temporal(
+                "MATCH (e:Entity) WHERE e.uuid IN $uuids DETACH DELETE e",
+                {"uuids": orphan_uuids},
+            )
+
+        logger.info("Episode deleted: %s  (entities pruned: %d)", episode_uuid[:8], entities_pruned)
+        return {"deleted": True, "uuid": episode_uuid, "entities_pruned": entities_pruned}
+
+    async def update_episode(self, episode_uuid: str, new_content: str) -> dict[str, Any]:
+        """
+        Update the content of an existing episode and re-index it.
+
+        Steps:
+          1. Verify the episode exists.
+          2. Re-embed new_content → new vector.
+          3. Update content + content_embedding + updated_at on the Episode node.
+          4. Run entity extraction on new_content and add any new entities
+             (existing entity links are preserved).
+
+        Returns updated episode metadata.
+        """
+        existing = await self.get_episode(episode_uuid)
+        if not existing:
+            return {"updated": False, "uuid": episode_uuid, "reason": "not found"}
+
+        now_unix = int(datetime.now(timezone.utc).timestamp())
+
+        try:
+            new_embedding = await self.embedder.embed(new_content)
+        except Exception as exc:
+            logger.warning("Re-embed failed for episode %s: %s", episode_uuid[:8], exc)
+            new_embedding = None
+
+        update_params: dict[str, Any] = {
+            "uuid": episode_uuid,
+            "content": new_content,
+            "updated_at": now_unix,
+        }
+        if new_embedding:
+            await self.driver.query_temporal(
+                """
+                MATCH (ep:Episode {uuid: $uuid})
+                SET ep.content = $content,
+                    ep.content_embedding = $embedding,
+                    ep.updated_at = $updated_at
+                """,
+                {**update_params, "embedding": new_embedding},
+            )
+        else:
+            await self.driver.query_temporal(
+                """
+                MATCH (ep:Episode {uuid: $uuid})
+                SET ep.content = $content,
+                    ep.updated_at = $updated_at
+                """,
+                update_params,
+            )
+
+        ep_props = existing.get("ep", existing)
+        namespace = ep_props.get("agent_namespace", self.agent_namespace) if isinstance(ep_props, dict) else self.agent_namespace
+
+        new_entities_added = 0
+        try:
+            tmp_episode = type("_Ep", (), {
+                "uuid": episode_uuid,
+                "content": new_content,
+                "agent_namespace": namespace,
+            })()
+            extracted = await self._extract_entities(tmp_episode)
+            for raw_entity in extracted:
+                if self._deduplicator:
+                    resolved = await self._deduplicator.resolve(raw_entity, namespace)
+                else:
+                    resolved = raw_entity
+                canonical_uuid = await self.entity_registry.get_or_register(resolved)
+                resolved.uuid = canonical_uuid
+
+                existing_entity = await self.get_entity(canonical_uuid)
+                if not existing_entity:
+                    try:
+                        emb = await self.embedder.embed(resolved.name)
+                        resolved.name_embedding = emb
+                    except Exception:
+                        pass
+                    await self._upsert_entity(resolved)
+                    new_entities_added += 1
+                await self.entity_registry.touch(resolved.uuid)
+        except Exception as exc:
+            logger.warning("Entity re-extraction failed for episode %s: %s", episode_uuid[:8], exc)
+
+        logger.info("Episode updated: %s  (new_entities: %d)", episode_uuid[:8], new_entities_added)
+        return {
+            "updated": True,
+            "uuid": episode_uuid,
+            "content_preview": new_content[:120],
+            "updated_at": now_unix,
+            "new_entities_added": new_entities_added,
+            "re_embedded": new_embedding is not None,
+        }
+
     # ------------------------------------------------------------------
     # Utilities
     # ------------------------------------------------------------------

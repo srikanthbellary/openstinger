@@ -113,8 +113,9 @@ class LLMConfig(BaseModel):
     fast_model: str = "claude-haiku-4-5-20251001"
     llm_base_url: Optional[str] = None        # override for OpenAI-compatible providers
     embedding_model: str = "text-embedding-3-small"
-    embedding_provider: Literal["openai", "anthropic"] = "openai"
+    embedding_provider: Literal["openai", "anthropic", "ollama"] = "openai"
     embedding_base_url: Optional[str] = None  # override for non-OpenAI embedding providers
+    ollama_host: str = "http://localhost:11434"  # base URL for Ollama (used when embedding_provider=ollama)
 
 
 class IngestionConfig(BaseModel):

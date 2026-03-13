@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "openstinger"
-version = "0.7.0"
+version = "0.8.0"
 description = "Three-tier AI agent memory, reasoning, and alignment harness"
 requires-python = ">=3.10"
 license = { text = "MIT" }

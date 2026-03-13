@@ -1,5 +1,5 @@
 """
-Tier 1 MCP tool handlers — 9 tools.
+Tier 1 MCP tool handlers — 11 tools.
 
 Tools:
   1. memory_add            — add an episode manually
@@ -11,6 +11,8 @@ Tools:
   7. memory_ingest_now     — trigger immediate session ingestion
   8. memory_namespace_status — namespace health + stats
   9. memory_list_agents    — list registered agent namespaces
+ 10. memory_delete         — permanently delete an episode (+ prune orphaned entities)
+ 11. memory_update         — update episode content and re-index
 
 Search strategy (memory_search):
   - Primary: BM25 fulltext index (fast, token-based)
@@ -562,3 +564,50 @@ async def memory_list_agents(scheduler: Any) -> dict:
             for ns in namespaces
         ],
     }
+
+
+# ---------------------------------------------------------------------------
+# Tool 10: memory_delete
+# ---------------------------------------------------------------------------
+
+async def memory_delete(
+    engine: Any,
+    db: Any,
+    episode_uuid: str,
+) -> dict:
+    """
+    Permanently delete an episode from the temporal memory graph.
+
+    Cascade-removes any Entity nodes that become orphaned after deletion
+    (entities with no remaining MENTIONS relationships).
+
+    Also removes the episode record from the operational DB.
+    """
+    result = await engine.delete_episode(episode_uuid)
+
+    if result.get("deleted"):
+        try:
+            await db.delete_episode(episode_uuid)
+        except Exception as exc:
+            logger.debug("Operational DB episode delete skipped or failed: %s", exc)
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Tool 11: memory_update
+# ---------------------------------------------------------------------------
+
+async def memory_update(
+    engine: Any,
+    episode_uuid: str,
+    new_content: str,
+) -> dict:
+    """
+    Update the content of an existing episode and re-index it.
+
+    Re-embeds the new content for semantic search and runs entity extraction
+    diff to add any new entities introduced by the updated content.
+    Existing entity relationships are preserved.
+    """
+    return await engine.update_episode(episode_uuid, new_content)

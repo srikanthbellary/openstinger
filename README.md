@@ -23,7 +23,7 @@
 
 ---
 
-The autonomous era needs more than execution. Agents hallucinate facts. They drift from their values. They forget who they are. **OpenStinger** is the memory, reasoning, and alignment infrastructure that keeps them grounded — exposed as 28 MCP tools any agent calls natively.
+The autonomous era needs more than execution. Agents hallucinate facts. They drift from their values. They forget who they are. **OpenStinger** is the memory, reasoning, and alignment infrastructure that keeps them grounded — exposed as 30 MCP tools any agent calls natively.
 
 Built on [FalkorDB](https://falkordb.com) (bi-temporal graph + vector) and [PostgreSQL](https://postgresql.org) (operational audit DB), served over [Model Context Protocol](https://modelcontextprotocol.io). No SDK changes. No vendor lock-in.
 
@@ -54,7 +54,7 @@ Start alongside. Go primary when ready. No framework migration required.
 | **Nanobot** | ✅ confirmed Feb 2026 | [View guide](integrations/NANOBOT.md) |
 | **ZeroClaw** | ✅ swappable trait | [View guide](integrations/ZEROCLAW.md) |
 | **NanoClaw** | ✅ Agent SDK native | [View guide](integrations/NANOCLAW.md) |
-| **PicoClaw** | 🔄 in roadmap | [View guide](integrations/PICOCLAW.md) |
+| **PicoClaw** | ✅ v0.8 | [View guide](integrations/PICOCLAW.md) |
 | **Claude Code** | ✅ MCP native | Point at `http://localhost:8766/sse` |
 | **Cursor** | ✅ MCP native | Point at `http://localhost:8766/sse` |
 
@@ -66,7 +66,7 @@ Three additive tiers. Start with Tier 1 and unlock the rest as data accumulates.
 
 | Tier | Name | Tools | What it gives your agent |
 |---|---|---|---|
-| **Tier 1** | Memory Harness | 9 | Bi-temporal episodic memory. Every session ingested automatically. Hybrid BM25 + vector semantic search. Date filtering. Numeric/IP search. |
+| **Tier 1** | Memory Harness | 11 | Bi-temporal episodic memory. Every session ingested automatically. Hybrid BM25 + vector semantic search. Date filtering. Numeric/IP search. Delete and update stored memories. |
 | **Tier 2** | StingerVault | 11 | Autonomous distillation of sessions into structured self-knowledge: identity, domain, methodology, preferences, constraints. External document ingestion (URL, PDF, YouTube). |
 | **Tier 3** | Gradient | 8 | Synchronous alignment evaluation before every response. Drift detection. Correction engine. 3 new observability tools (v0.7). Starts in observe-only mode. |
 
@@ -135,12 +135,12 @@ docker compose up -d
 
 ### 4. Start OpenStinger
 
-**Tier 1 only** (memory, 9 tools):
+**Tier 1 only** (memory, 11 tools):
 ```bash
 python -m openstinger.mcp.server
 ```
 
-**All tiers** (memory + vault + alignment, 28 tools):
+**All tiers** (memory + vault + alignment, 30 tools):
 ```bash
 python -m openstinger.gradient.mcp.server
 ```
@@ -190,7 +190,7 @@ Set `OPENAI_API_KEY` in `.env` to your Novita (or other) API key.
 
 ## MCP Tools
 
-### Tier 1 — Memory (9 tools)
+### Tier 1 — Memory (11 tools)
 
 | Tool | What it does |
 |---|---|
@@ -203,6 +203,8 @@ Set `OPENAI_API_KEY` in `.env` to your Novita (or other) API key.
 | `memory_ingest_now` | Trigger immediate session ingestion |
 | `memory_namespace_status` | Health stats: episode / entity / edge counts |
 | `memory_list_agents` | List all registered agent namespaces |
+| `memory_delete` | Permanently delete an episode and prune orphaned entities (v0.8) |
+| `memory_update` | Update episode content and re-index with new embedding (v0.8) |
 
 ### Tier 2 — StingerVault (11 tools)
 
@@ -301,11 +303,11 @@ Qwen-Agent  ──┤  OpenStinger MCP Server (Python · port 8766)
 LangGraph   ──┤
 Claude Code ──┤
 Cursor      ──┘
-               ├── Tier 1  memory_query · memory_add ···········  9 tools
+               ├── Tier 1  memory_query · memory_add ··········· 11 tools
                ├── Tier 2  vault_promote_now · vault_note_get   11 tools
                └── Tier 3  gradient_alignment_score · ops_status 8 tools
                     │                                     ─────────────────
-                    │                                     28 tools total
+                    │                                     30 tools total
                     ├── FalkorDB    (graph · vectors · episodic memory)
                     ├── PostgreSQL  (jobs · alignment events · registry)
                     └── vault/      (notes · SHA-256 synced · auditable)
@@ -359,7 +361,7 @@ Tier 2  python -m openstinger.scaffold.mcp.server          ← vault activates
 Tier 3  python -m openstinger.gradient.mcp.server          ← alignment activates (observe-only first)
 ```
 
-Each tier includes all lower tiers. Running Tier 3 gives you all 28 tools.
+Each tier includes all lower tiers. Running Tier 3 gives you all 30 tools.
 
 ---
 

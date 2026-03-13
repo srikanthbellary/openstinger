@@ -45,7 +45,7 @@ Unlike DeerFlow — which already writes `thread.json` files OpenStinger can rea
 ```bash
 # From your openstinger directory
 docker compose up -d                            # FalkorDB + PostgreSQL + Adminer
-python -m openstinger.gradient.mcp.server       # all 28 tools on port 8766
+python -m openstinger.gradient.mcp.server       # all 30 tools on port 8766
 ```
 
 Verify:
@@ -158,7 +158,7 @@ while True:
 
 ### Connecting OpenStinger MCP Tools to Qwen-Agent
 
-To give the agent access to OpenStinger's 28 tools (so it can call `memory_query`, `ops_status`, etc.), add the MCP server to Qwen-Agent's `function_list`:
+To give the agent access to OpenStinger's 30 tools (so it can call `memory_query`, `ops_status`, etc.), add the MCP server to Qwen-Agent's `function_list`:
 
 ```python
 agent = OpenStingerQwenAgent(

@@ -1,22 +1,22 @@
 # Agent Skills Template for OpenStinger
 
-A runtime-agnostic guide for teaching any MCP-compatible agent how to use OpenStinger's 28 tools effectively. Copy and adapt this into your agent's system prompt, skills file, or tool-use instructions.
+A runtime-agnostic guide for teaching any MCP-compatible agent how to use OpenStinger's 30 tools effectively. Copy and adapt this into your agent's system prompt, skills file, or tool-use instructions.
 
 ---
 
 ## Overview
 
-OpenStinger exposes 28 tools across three tiers. Each tier is additive — Tier 1 works standalone, Tier 2 builds on Tier 1, Tier 3 requires Tier 2 data to be useful.
+OpenStinger exposes 30 tools across three tiers. Each tier is additive — Tier 1 works standalone, Tier 2 builds on Tier 1, Tier 3 requires Tier 2 data to be useful.
 
 | Tier | Name | Tools | When it becomes useful |
 |---|---|---|---|
-| Tier 1 | Memory Harness | 9 | Immediately on first session |
+| Tier 1 | Memory Harness | 11 | Immediately on first session |
 | Tier 2 | StingerVault | 11 | After ~500 episodes ingested |
 | Tier 3 | Gradient | 8 | After ~50+ vault notes exist |
 
 ---
 
-## Tier 1 — Memory Harness (9 tools)
+## Tier 1 — Memory Harness (11 tools)
 
 ### `memory_query` ⭐ (use this most)
 **When:** At the start of any new session, or when the user references a past event, person, decision, or context you don't have in your current window.
@@ -49,9 +49,21 @@ memory_add(content="User decided to sunset the trading bot on 2026-03-15", sourc
 ### `memory_job_status` / `memory_get_entity` / `memory_get_episode` / `memory_list_agents`
 **When:** Debugging — checking ingestion job status, fetching specific entities or episodes by UUID, listing all registered agent namespaces.
 
+### `memory_delete` (v0.8)
+**When:** A stored memory is incorrect, outdated, or sensitive and must be removed. Cascade-removes orphaned entity nodes.
+```
+memory_delete(episode_uuid="abc-123...")
+```
+
+### `memory_update` (v0.8)
+**When:** A stored memory needs correction or enrichment. Re-embeds the new content and runs entity extraction diff.
+```
+memory_update(episode_uuid="abc-123...", new_content="corrected content here")
+```
+
 ---
 
-## Tier 2 — StingerVault (+11 tools, 20 total)
+## Tier 2 — StingerVault (+11 tools, 22 total)
 
 Vault is structured self-knowledge distilled from episodic memory. Five categories: **IDENTITY**, **DOMAIN**, **METHODOLOGY**, **PREFERENCE**, **CONSTRAINT**.
 

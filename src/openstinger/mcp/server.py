@@ -1,7 +1,7 @@
 """
 Tier 1 MCP server — OpenStinger memory harness.
 
-Exposes 9 MCP tools. Supports stdio (default) and TCP transport.
+Exposes 11 MCP tools. Supports stdio (default) and TCP transport.
 
 Startup sequence:
   1. Load config (config.yaml + .env)
@@ -30,6 +30,7 @@ from openstinger.config import HarnessConfig, load_config
 from openstinger.ingestion.scheduler import IngestionSchedulerRegistry
 from openstinger.mcp.tools.memory_tools import (
     memory_add,
+    memory_delete,
     memory_get_entity,
     memory_get_episode,
     memory_ingest_now,
@@ -38,6 +39,7 @@ from openstinger.mcp.tools.memory_tools import (
     memory_namespace_status,
     memory_query,
     memory_search,
+    memory_update,
 )
 from openstinger.operational.adapter import create_adapter
 from openstinger.temporal.anthropic_client import AnthropicClient
@@ -176,6 +178,37 @@ TOOL_SCHEMAS: list[types.Tool] = [
         description="List all registered agent namespaces.",
         inputSchema={"type": "object", "properties": {}},
     ),
+    types.Tool(
+        name="memory_delete",
+        description=(
+            "Permanently delete an episode from the temporal memory graph. "
+            "Cascade-removes any entity nodes that become orphaned (no remaining episode connections). "
+            "Use to remove stale, incorrect, or sensitive memories."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "episode_uuid": {"type": "string", "description": "UUID of the episode to delete"},
+            },
+            "required": ["episode_uuid"],
+        },
+    ),
+    types.Tool(
+        name="memory_update",
+        description=(
+            "Update the content of an existing episode and re-index it. "
+            "Re-embeds the new content and runs entity extraction diff (adds new entities, "
+            "keeps existing). Use to correct or enrich a stored memory."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "episode_uuid": {"type": "string", "description": "UUID of the episode to update"},
+                "new_content": {"type": "string", "description": "Replacement content for the episode"},
+            },
+            "required": ["episode_uuid", "new_content"],
+        },
+    ),
 ]
 
 
@@ -234,6 +267,10 @@ class OpenStingerServer:
                 return await memory_namespace_status(self.engine, self.db, **args)
             case "memory_list_agents":
                 return await memory_list_agents(self.scheduler)
+            case "memory_delete":
+                return await memory_delete(self.engine, self.db, **args)
+            case "memory_update":
+                return await memory_update(self.engine, **args)
             case _:
                 return {"error": f"Unknown tool: {name}"}
 
@@ -248,6 +285,7 @@ class OpenStingerServer:
             port=cfg.falkordb.port,
             password=cfg.falkordb.password,
             timeout_seconds=30.0,
+            vector_dimensions=cfg.falkordb.vector_dimensions,
         )
         await self.driver.init_schema()
 
@@ -274,12 +312,25 @@ class OpenStingerServer:
                 model=cfg.llm.model,
                 fast_model=cfg.llm.fast_model,
             )
-        self.embedder = OpenAIEmbedder(
-            api_key=os.environ.get("OPENAI_API_KEY"),
-            model=cfg.llm.embedding_model,
-            dimensions=cfg.falkordb.vector_dimensions,
-            base_url=cfg.llm.embedding_base_url or None,
-        )
+        if cfg.llm.embedding_provider == "ollama":
+            self.embedder = OpenAIEmbedder(
+                api_key="ollama",
+                model=cfg.llm.embedding_model,
+                dimensions=cfg.falkordb.vector_dimensions,
+                base_url=f"{cfg.llm.ollama_host}/v1",
+                skip_dimensions=True,
+            )
+            logger.info("Embedder: Ollama  host=%s  model=%s  dims=%d",
+                        cfg.llm.ollama_host, cfg.llm.embedding_model, cfg.falkordb.vector_dimensions)
+        else:
+            self.embedder = OpenAIEmbedder(
+                api_key=os.environ.get("OPENAI_API_KEY"),
+                model=cfg.llm.embedding_model,
+                dimensions=cfg.falkordb.vector_dimensions,
+                base_url=cfg.llm.embedding_base_url or None,
+            )
+            logger.info("Embedder: %s  model=%s  dims=%d",
+                        cfg.llm.embedding_provider, cfg.llm.embedding_model, cfg.falkordb.vector_dimensions)
 
         # v0.5: wrap embedder with SQLite-backed cache to eliminate redundant
         # API calls during vault re-syncs and repeated entity embedding.

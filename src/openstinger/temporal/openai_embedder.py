@@ -28,8 +28,12 @@ logger = logging.getLogger(__name__)
 class OpenAIEmbedder:
     """Async-compatible OpenAI-compatible embeddings wrapper.
 
-    Works with any OpenAI-compatible API (OpenAI, Novita, etc.)
+    Works with any OpenAI-compatible API (OpenAI, Novita, Ollama, etc.)
     Set base_url to point at an alternative provider.
+
+    skip_dimensions: if True, the `dimensions` parameter is omitted from API
+    calls. Required for Ollama and other providers that don't support truncated
+    output dimensions (they always return the model's native dimension size).
     """
 
     def __init__(
@@ -38,10 +42,12 @@ class OpenAIEmbedder:
         model: str = "text-embedding-3-small",
         dimensions: int = 1536,
         base_url: str | None = None,
+        skip_dimensions: bool = False,
     ) -> None:
         self.model = model
         self.dimensions = dimensions
-        client_kwargs: dict = {"api_key": api_key}
+        self.skip_dimensions = skip_dimensions
+        client_kwargs: dict = {"api_key": api_key or "no-key"}
         if base_url:
             client_kwargs["base_url"] = base_url
         self._client = openai.OpenAI(**client_kwargs)
@@ -70,14 +76,13 @@ class OpenAIEmbedder:
 
         loop = asyncio.get_event_loop()
 
-        response = await loop.run_in_executor(
-            None,
-            lambda: self._client.embeddings.create(
-                model=self.model,
-                input=texts,
-                dimensions=self.dimensions,
-            ),
-        )
+        def _call() -> Any:
+            kwargs: dict[str, Any] = {"model": self.model, "input": texts}
+            if not self.skip_dimensions:
+                kwargs["dimensions"] = self.dimensions
+            return self._client.embeddings.create(**kwargs)
+
+        response = await loop.run_in_executor(None, _call)
 
         # Sort by index to preserve order
         sorted_data = sorted(response.data, key=lambda d: d.index)

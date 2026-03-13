@@ -54,7 +54,7 @@ ingestion:
 
 ### 4. Add OpenStinger to Claudia's SKILL.md
 
-Add a `SKILL.md` to `openclaw-data/workspace/skills/openstinger/SKILL.md` so Claudia knows how to use all 28 tools. See [the OpenStinger repo](../README.md#mcp-tools) for the full tool reference.
+Add a `SKILL.md` to `openclaw-data/workspace/skills/openstinger/SKILL.md` so Claudia knows how to use all 30 tools. See [the OpenStinger repo](../README.md#mcp-tools) for the full tool reference.
 
 ## Operational Queries You Can Run Immediately
 

@@ -38,7 +38,7 @@ OpenStinger also ingests DeerFlow's `thread.json` session files automatically â€
 ```bash
 # From your openstinger directory
 docker compose up -d           # starts FalkorDB + PostgreSQL + Adminer
-python -m openstinger.gradient.mcp.server   # starts all 28 tools on port 8766
+python -m openstinger.gradient.mcp.server   # starts all 30 tools on port 8766
 ```
 
 Verify it's running:
