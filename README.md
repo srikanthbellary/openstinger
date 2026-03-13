@@ -188,6 +188,52 @@ Set `OPENAI_API_KEY` in `.env` to your Novita (or other) API key.
 
 ---
 
+## Local Embeddings via Ollama (v0.8)
+
+Run embeddings entirely on-device — no cloud API key, no network calls, no cost per token. Full local operation for air-gapped environments or privacy-sensitive deployments.
+
+**Supported models:**
+
+| Model | Dimensions | Pull command |
+|---|---|---|
+| `nomic-embed-text` | 768 | `ollama pull nomic-embed-text` |
+| `mxbai-embed-large` | 1024 | `ollama pull mxbai-embed-large` |
+| `all-minilm` | 384 | `ollama pull all-minilm` |
+
+**Setup via interactive init (recommended):**
+
+```bash
+openstinger-cli init
+# → When prompted for "Embedding provider", select "ollama"
+# → Select model — dimensions are auto-populated
+```
+
+**Or configure manually in `config.yaml`:**
+
+```yaml
+llm:
+  embedding_provider: ollama
+  embedding_model: nomic-embed-text
+  ollama_host: http://localhost:11434   # default; change if Ollama runs elsewhere
+
+falkordb:
+  vector_dimensions: 768   # must match the model's native output size
+```
+
+In `.env`, set `OPENAI_API_KEY=ollama` (the client requires a non-empty value; Ollama ignores it):
+
+```env
+OPENAI_API_KEY=ollama
+```
+
+> **Breaking change warning:** `vector_dimensions` must match the embedding model's native output size. If you switch models after data has been ingested, you must wipe and re-create the FalkorDB vector indices:
+> ```bash
+> docker compose down -v && docker compose up -d
+> ```
+> Then re-ingest your sessions. Embeddings from different dimension sizes are not compatible.
+
+---
+
 ## MCP Tools
 
 ### Tier 1 — Memory (11 tools)
