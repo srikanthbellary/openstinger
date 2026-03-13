@@ -1,0 +1,81 @@
+version: "3.9"
+
+# OpenStinger infrastructure services
+# Usage: docker compose up -d
+#
+# Services:
+#   falkordb          — graph database on localhost:6379 (password-protected)
+#   falkordb-browser  — visual graph browser at http://localhost:3000
+#
+# Datasette (SQLite browser at http://localhost:8001) runs as a Python process,
+# not Docker — start it with: datasette .openstinger/openstinger.db --port 8001
+# Or use the startup script: scripts/start.sh
+
+services:
+  falkordb:
+    image: falkordb/falkordb:latest
+    container_name: openstinger_falkordb
+    ports:
+      - "6379:6379"
+    volumes:
+      - falkordb_data:/data
+    command: ["--requirepass", "${FALKORDB_PASSWORD}"]
+    env_file:
+      - .env
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${FALKORDB_PASSWORD}", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  falkordb-browser:
+    image: falkordb/falkordb-browser:latest
+    container_name: openstinger_browser
+    ports:
+      - "3000:3000"
+    environment:
+      FALKORDB_HOST: "host.docker.internal"
+      FALKORDB_PORT: "6379"
+      FALKORDB_PASSWORD: "${FALKORDB_PASSWORD}"
+      NEXTAUTH_SECRET: "${NEXTAUTH_SECRET:-set-this-in-your-dotenv-file}"
+      NEXTAUTH_URL: "http://localhost:3000"
+    env_file:
+      - .env
+    restart: unless-stopped
+    depends_on:
+      falkordb:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: openstinger_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: openstinger
+      POSTGRES_USER: openstinger
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-change-me-set-in-env}"  # always override via .env
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U openstinger -d openstinger"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  adminer:
+    image: adminer:latest
+    container_name: openstinger_adminer
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  falkordb_data:
+    driver: local
+  postgres_data:
+    driver: local

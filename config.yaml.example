@@ -1,0 +1,76 @@
+# ============================================================
+# OpenStinger Configuration — copy to config.yaml and adjust
+# ============================================================
+
+# Agent identity
+agent_name: default                   # unique name for this agent instance
+agent_namespace: default              # namespace for temporal graph isolation
+
+# FalkorDB
+falkordb:
+  host: "${FALKORDB_HOST:localhost}"
+  port: "${FALKORDB_PORT:6379}"
+  password: "${FALKORDB_PASSWORD:}"
+  temporal_graph: openstinger_temporal
+  knowledge_graph: openstinger_knowledge
+  vector_dimensions: 1536             # OpenAI text-embedding-3-small default
+
+# Operational database
+operational_db:
+  provider: sqlite                    # sqlite | postgresql
+  sqlite_path: ".openstinger/openstinger.db"
+  # postgresql_url: "postgresql+asyncpg://user:pass@localhost:5432/openstinger"
+
+# LLM settings
+llm:
+  provider: anthropic                 # anthropic | openai
+  model: claude-sonnet-4-6            # model for classification/deduplication/conflict resolution
+  fast_model: claude-haiku-4-5-20251001  # model for high-frequency evaluation (Tier 3)
+  embedding_model: text-embedding-3-small
+  embedding_provider: openai
+
+# Ingestion settings (Tier 1)
+ingestion:
+  sessions_dir: null                  # path to OpenClaw sessions/ dir — required for auto-ingestion
+  workspace_dir: null                 # path to OpenClaw workspace/ dir — read-only reference
+  poll_interval_seconds: 5
+  chunk_size: 10                      # episodes per ingestion batch
+
+# Deduplication thresholds (Tier 1)
+deduplication:
+  token_overlap_min: 0.4
+  lsh_threshold: 0.5
+  llm_confidence_min: 0.85
+  identity_confidence_min: 0.92       # more conservative for identity notes (Tier 2)
+
+# Community detection
+community:
+  update_every_n: 0                   # 0 = disabled for v0.1
+
+# Vault settings (Tier 2)
+vault:
+  vault_dir: ".openstinger/vault"
+  classification_interval_seconds: 300   # 5 minutes
+  sync_interval_seconds: 120             # 2 minutes
+  decay_days: 90
+  episodes_per_classification_batch: 20
+
+# Gradient settings (Tier 3)
+gradient:
+  enabled: false                      # enable only after calibration period
+  observe_only: true                  # true = evaluate and log but never block
+  evaluation_timeout_ms: 2000
+  drift_window_size: 20
+  drift_alert_threshold: 0.65
+  consecutive_flag_limit: 5
+  min_outputs_before_active: 100
+
+# MCP transport
+mcp:
+  transport: stdio                    # stdio | tcp
+  tcp_port: 8765
+
+# Logging
+logging:
+  level: INFO                         # DEBUG | INFO | WARNING | ERROR
+  file: null                          # null = stdout only; or path to log file
