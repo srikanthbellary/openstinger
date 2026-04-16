@@ -29,6 +29,7 @@ from pathlib import Path
 
 from openstinger.ingestion.session_reader import SessionReader
 from openstinger.ingestion.profile_reader import AgentProfileIngester
+from openstinger.utils.provenance import compute_content_hash, compute_receipt_hash
 
 logger = logging.getLogger(__name__)
 
@@ -175,14 +176,30 @@ class IngestionSchedulerRegistry:
                 if episode is not None and db is not None:
                     try:
                         episode_uuid = getattr(episode, "uuid", None) or str(episode)
+                        raw_content  = episode_dict.get("content", "")
+                        raw_valid_at = episode_dict.get("valid_at", int(time.time()))
+
+                        # v0.9: hash-chained provenance
+                        content_hash   = compute_content_hash(raw_content)
+                        previous_hash  = await db.get_latest_provenance_hash(namespace)
+                        prov_hash      = compute_receipt_hash(
+                            episode_uuid    = episode_uuid,
+                            agent_namespace = namespace,
+                            content_hash    = content_hash,
+                            valid_at        = raw_valid_at,
+                            previous_hash   = previous_hash,
+                        )
+
                         await db.log_episode(
-                            episode_uuid=episode_uuid,
-                            agent_namespace=namespace,
-                            source=episode_dict.get("source", "conversation"),
-                            entity_count=0,
-                            edge_count=0,
-                            job_uuid=job.uuid if job else None,
-                            valid_at=episode_dict.get("valid_at", int(time.time())),
+                            episode_uuid    = episode_uuid,
+                            agent_namespace = namespace,
+                            source          = episode_dict.get("source", "conversation"),
+                            entity_count    = 0,
+                            edge_count      = 0,
+                            job_uuid        = job.uuid if job else None,
+                            valid_at        = raw_valid_at,
+                            provenance_hash = prov_hash,
+                            previous_hash   = previous_hash,
                         )
                         successful_count += 1
                     except Exception as log_exc:

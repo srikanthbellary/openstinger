@@ -3,7 +3,7 @@ SQLAlchemy ORM models for the operational database.
 
 Spec: docs/05_OPERATIONAL_DB_SCHEMA.md
 
-All 11 tables across 3 tiers (additive — each tier adds tables, never removes):
+All 12 tables across 3 tiers (additive — each tier adds tables, never removes):
 
   Tier 1 (4 tables):
     ingestion_jobs   — ingestion pipeline job lifecycle tracking
@@ -165,6 +165,9 @@ class EpisodeLog(Base):
     ingestion_job_uuid: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
     created_at: Mapped[int] = mapped_column(BigInteger, default=_now)
     valid_at: Mapped[int] = mapped_column(BigInteger, default=_now)
+    # v0.9 — hash-chained write provenance (nullable for backcompat)
+    provenance_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    previous_hash:   Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
 
 
 # ---------------------------------------------------------------------------

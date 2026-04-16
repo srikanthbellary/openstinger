@@ -1,5 +1,5 @@
 """
-Tier 1 MCP tool handlers — 11 tools.
+Tier 1 MCP tool handlers — 12 tools (v0.9: +memory_wake_up).
 
 Tools:
   1. memory_add            — add an episode manually
@@ -93,6 +93,28 @@ async def memory_add(
 ) -> dict:
     """Manually add an episode to the temporal memory graph."""
     namespace = agent_namespace or engine.agent_namespace
+
+    # v0.9: Write Policy check — detect near-duplicate before writing
+    write_policy = getattr(engine, "_write_policy", None)
+    if write_policy is not None:
+        try:
+            from openstinger.temporal.write_policy import WriteOp
+            decision = await write_policy.evaluate(
+                op_type         = "add",
+                content         = content,
+                agent_namespace = namespace,
+                engine          = engine,
+            )
+            if decision.op == WriteOp.NOOP:
+                return {
+                    "status":        "noop",
+                    "reason":        decision.reason,
+                    "existing_uuid": decision.existing_uuid,
+                    "namespace":     namespace,
+                }
+        except Exception as _wp_exc:
+            logger.debug("write_policy check failed (fail-open): %s", _wp_exc)
+
     episode = await engine.add_episode(
         content=content,
         source=source,

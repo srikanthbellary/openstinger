@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from sqlalchemy import select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from openstinger.operational.models import (
@@ -75,9 +76,24 @@ class OperationalDBAdapter(ABC):
 
     # -- EpisodeLog --
     @abstractmethod
-    async def log_episode(self, episode_uuid: str, agent_namespace: str, source: str, entity_count: int, edge_count: int, job_uuid: str | None = None, valid_at: int | None = None) -> None: ...
+    async def log_episode(
+        self,
+        episode_uuid:    str,
+        agent_namespace: str,
+        source:          str,
+        entity_count:    int,
+        edge_count:      int,
+        job_uuid:        str | None = None,
+        valid_at:        int | None = None,
+        provenance_hash: str | None = None,   # v0.9
+        previous_hash:   str | None = None,   # v0.9
+    ) -> None: ...
     @abstractmethod
     async def get_episode_log(self, episode_uuid: str) -> Optional[EpisodeLog]: ...
+    @abstractmethod
+    async def get_latest_provenance_hash(self, agent_namespace: str) -> str | None:
+        """Return the most recent provenance_hash for the given namespace, or None (v0.9)."""
+        ...
 
     # -- EntityRegistry --
     @abstractmethod
@@ -152,7 +168,14 @@ class SQLAlchemyAdapter(OperationalDBAdapter):
 
     def __init__(self, dsn: str) -> None:
         self._dsn = dsn
-        self._engine = create_async_engine(dsn, echo=False)
+        self._engine = create_async_engine(
+            dsn,
+            echo=False,
+            pool_size=20,
+            max_overflow=10,
+            pool_timeout=10,   # fail fast if pool exhausted during ingestion
+            pool_pre_ping=True,
+        )
         self._session_factory = async_sessionmaker(
             self._engine, expire_on_commit=False
         )
@@ -261,13 +284,15 @@ class SQLAlchemyAdapter(OperationalDBAdapter):
 
     async def log_episode(
         self,
-        episode_uuid: str,
+        episode_uuid:    str,
         agent_namespace: str,
-        source: str,
-        entity_count: int,
-        edge_count: int,
-        job_uuid: str | None = None,
-        valid_at: int | None = None,
+        source:          str,
+        entity_count:    int,
+        edge_count:      int,
+        job_uuid:        str | None = None,
+        valid_at:        int | None = None,
+        provenance_hash: str | None = None,   # v0.9
+        previous_hash:   str | None = None,   # v0.9
     ) -> None:
         log = EpisodeLog(
             uuid=episode_uuid,
@@ -277,6 +302,8 @@ class SQLAlchemyAdapter(OperationalDBAdapter):
             edge_count=edge_count,
             ingestion_job_uuid=job_uuid,
             valid_at=valid_at or _now(),
+            provenance_hash=provenance_hash,
+            previous_hash=previous_hash,
         )
         async with self._session_factory() as session:
             session.add(log)
@@ -285,6 +312,17 @@ class SQLAlchemyAdapter(OperationalDBAdapter):
             except Exception:
                 await session.rollback()
                 logger.debug("Episode already logged: %s", episode_uuid)
+
+    async def get_latest_provenance_hash(self, agent_namespace: str) -> str | None:
+        """Return the most recent provenance_hash for the given namespace, or None (v0.9)."""
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(EpisodeLog.provenance_hash)
+                .where(EpisodeLog.agent_namespace == agent_namespace)
+                .order_by(EpisodeLog.id.desc())
+                .limit(1)
+            )
+            return result.scalar_one_or_none()
 
     async def get_episode_log(self, episode_uuid: str) -> Optional[EpisodeLog]:
         async with self._session_factory() as session:
@@ -399,25 +437,32 @@ class SQLAlchemyAdapter(OperationalDBAdapter):
     async def upsert_vault_note(
         self, uuid: str, agent_namespace: str, category: str, confidence: float = 0.85
     ) -> None:
-        async with self._session_factory() as session:
-            result = await session.execute(
-                select(VaultNote).where(VaultNote.uuid == uuid)
+        now = _now()
+        stmt = (
+            pg_insert(VaultNote)
+            .values(
+                uuid=uuid,
+                agent_namespace=agent_namespace,
+                category=category,
+                confidence=confidence,
+                created_at=now,
+                updated_at=now,
+                last_confirmed_at=now,
+                stale=0,
             )
-            row = result.scalar_one_or_none()
-            now = _now()
-            if row is None:
-                row = VaultNote(
-                    uuid=uuid, agent_namespace=agent_namespace,
-                    category=category, confidence=confidence,
-                    created_at=now, updated_at=now, last_confirmed_at=now,
-                )
-                session.add(row)
-            else:
-                row.category = category
-                row.confidence = confidence
-                row.updated_at = now
-                row.last_confirmed_at = now
-                row.stale = 0
+            .on_conflict_do_update(
+                index_elements=["uuid"],
+                set_={
+                    "category": category,
+                    "confidence": confidence,
+                    "updated_at": now,
+                    "last_confirmed_at": now,
+                    "stale": 0,
+                },
+            )
+        )
+        async with self._session_factory() as session:
+            await session.execute(stmt)
             await session.commit()
 
     async def mark_vault_note_stale(self, uuid: str) -> None:

@@ -126,6 +126,20 @@ class IngestionConfig(BaseModel):
     chunk_size: int = 10
     session_format: str = "openclaw"  # "openclaw" | "simple"
     concurrency: int = 5             # max parallel episodes per batch (1=sequential, 10=max)
+    write_policy_enabled: bool = True
+    write_policy_dedup_threshold: float = 0.95
+
+
+class ResilienceConfig(BaseModel):
+    """v0.9 — circuit breaker, timeout, and retry settings."""
+    circuit_breaker_failure_threshold: int   = 5
+    circuit_breaker_recovery_timeout:  int   = 30
+    circuit_breaker_success_threshold: int   = 2
+    tool_timeout_seconds:              float = 30.0
+    retry_max_attempts:                int   = 3
+    retry_base_delay:                  float = 1.0
+    retry_max_delay:                   float = 30.0
+    retry_jitter:                      bool  = True
 
 
 class DeduplicationConfig(BaseModel):
@@ -187,6 +201,7 @@ class HarnessConfig(BaseModel):
     gradient: GradientConfig = Field(default_factory=GradientConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
+    resilience: ResilienceConfig = Field(default_factory=ResilienceConfig)
 
     # Runtime-resolved paths (set post-init, not from YAML)
     _root_dir: Optional[Path] = None
