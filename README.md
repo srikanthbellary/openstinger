@@ -23,7 +23,7 @@
 
 ---
 
-The autonomous era needs more than execution. Agents hallucinate facts. They drift from their values. They forget who they are. **OpenStinger** is the memory, reasoning, and alignment infrastructure that keeps them grounded — exposed as 30 MCP tools any agent calls natively.
+The autonomous era needs more than execution. Agents hallucinate facts. They drift from their values. They forget who they are. **OpenStinger** is the memory, reasoning, and alignment infrastructure that keeps them grounded — exposed as 32 MCP tools any agent calls natively.
 
 Built on [FalkorDB](https://falkordb.com) (bi-temporal graph + vector) and [PostgreSQL](https://postgresql.org) (operational audit DB), served over [Model Context Protocol](https://modelcontextprotocol.io). No SDK changes. No vendor lock-in.
 
@@ -66,9 +66,9 @@ Three additive tiers. Start with Tier 1 and unlock the rest as data accumulates.
 
 | Tier | Name | Tools | What it gives your agent |
 |---|---|---|---|
-| **Tier 1** | Memory Harness | 11 | Bi-temporal episodic memory. Every session ingested automatically. Hybrid BM25 + vector semantic search. Date filtering. Numeric/IP search. Delete and update stored memories. |
+| **Tier 1** | Memory Harness | 12 | Bi-temporal episodic memory. Every session ingested automatically. Hybrid BM25 + vector semantic search. Date filtering. Numeric/IP search. Delete and update stored memories. Session boot context (`memory_wake_up`). |
 | **Tier 2** | StingerVault | 11 | Autonomous distillation of sessions into structured self-knowledge: identity, domain, methodology, preferences, constraints. External document ingestion (URL, PDF, YouTube). |
-| **Tier 3** | Gradient | 8 | Synchronous alignment evaluation before every response. Drift detection. Correction engine. 3 new observability tools (v0.7). Starts in observe-only mode. |
+| **Tier 3** | Gradient | 10 | Synchronous alignment evaluation before every response. Drift detection. Correction engine. Adversarial probe detection (GradientHoneypot). 3 new observability tools (v0.7). Starts in observe-only mode. |
 
 > ⚡ **Tier 3 ships in `observe_only` mode.**
 > It evaluates every response and logs alignment scores — but never blocks or corrects anything until you switch it on.
@@ -140,7 +140,7 @@ docker compose up -d
 python -m openstinger.mcp.server
 ```
 
-**All tiers** (memory + vault + alignment, 30 tools):
+**All tiers** (memory + vault + alignment, 32 tools):
 ```bash
 python -m openstinger.gradient.mcp.server
 ```
@@ -240,7 +240,7 @@ OPENAI_API_KEY=ollama
 
 | Tool | What it does |
 |---|---|
-| `memory_add` | Store an episode manually |
+| `memory_add` | Store an episode manually. Returns `status: noop` if a near-duplicate exists (v0.9 write policy). |
 | `memory_query` | Hybrid BM25 + vector search. Returns unified ranked results. Supports `after_date` / `before_date`. |
 | `memory_search` | Smart keyword search with automatic fallbacks: numeric/IP detection, temporal queries, fuzzy entity matching |
 | `memory_get_entity` | Fetch an entity and its current relationships by UUID |
@@ -251,6 +251,7 @@ OPENAI_API_KEY=ollama
 | `memory_list_agents` | List all registered agent namespaces |
 | `memory_delete` | Permanently delete an episode and prune orphaned entities (v0.8) |
 | `memory_update` | Update episode content and re-index with new embedding (v0.8) |
+| `memory_wake_up` | Session boot context: top episodes by access_count + vault identity notes (v0.9) |
 
 ### Tier 2 — StingerVault (11 tools)
 
@@ -260,7 +261,7 @@ OPENAI_API_KEY=ollama
 
 | Tool | What it does |
 |---|---|
-| `gradient_status` | Gradient health, profile state, observe_only flag |
+| `gradient_status` | Gradient health, profile state, observe_only flag, honeypot state (v0.9) |
 | `gradient_alignment_score` | Evaluate a response — returns score + verdict |
 | `gradient_drift_status` | Rolling window alignment stats |
 | `gradient_alignment_log` | Recent alignment evaluation log |
@@ -268,6 +269,8 @@ OPENAI_API_KEY=ollama
 | `ops_status` ⭐ | Single-call dashboard: vault notes + gradient pass rate + drift state |
 | `gradient_history` ⭐ | Last N alignment verdicts with scores from PostgreSQL |
 | `drift_status` ⭐ | Behavioral window drift history from PostgreSQL |
+| `gradient_honeypot_status` 🆕 | Registered patterns, recent alerts, lockdown state (v0.9) |
+| `gradient_honeypot_clear` 🆕 | Clear lockdown — only registered when `lockdown_mode: true` (v0.9) |
 
 **`ops_status` — what one call returns:**
 ```json
@@ -353,7 +356,7 @@ Cursor      ──┘
                ├── Tier 2  vault_promote_now · vault_note_get   11 tools
                └── Tier 3  gradient_alignment_score · ops_status 8 tools
                     │                                     ─────────────────
-                    │                                     30 tools total
+                    │                                     32 tools total
                     ├── FalkorDB    (graph · vectors · episodic memory)
                     ├── PostgreSQL  (jobs · alignment events · registry)
                     └── vault/      (notes · SHA-256 synced · auditable)
@@ -407,7 +410,7 @@ Tier 2  python -m openstinger.scaffold.mcp.server          ← vault activates
 Tier 3  python -m openstinger.gradient.mcp.server          ← alignment activates (observe-only first)
 ```
 
-Each tier includes all lower tiers. Running Tier 3 gives you all 30 tools.
+Each tier includes all lower tiers. Running Tier 3 gives you all 32 tools.
 
 ---
 
@@ -515,7 +518,7 @@ pytest tests/ -m tier3
 >
 > Every episode, entity, classification decision, and alignment event is logged to PostgreSQL — ready for dashboards, audits, and compliance reports. Not exported on request. Always on. Always queryable.
 
-Connect any BI tool — Metabase, Grafana, Superset, or `psql` — and get full operational visibility with zero additional instrumentation. OpenStinger logs everything to a 12-table schema from the moment it starts.
+Connect any BI tool — Metabase, Grafana, Superset, or `psql` — and get full operational visibility with zero additional instrumentation. OpenStinger logs everything to a 13-table schema from the moment it starts.
 
 ### Key queries
 

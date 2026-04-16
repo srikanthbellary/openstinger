@@ -1,19 +1,23 @@
 """
 Tier 3 (Gradient) MCP server.
 
-Routes all 22 Tier 1+2 tools unchanged + adds 8 Gradient tools (5 original + 3 v0.6) = 30 total.
+Routes all 22 Tier 1+2 tools unchanged + adds 8 Gradient tools + 1-2 Honeypot tools = 31-32 total.
 
 Gradient tools:
-  gradient_status         — gradient health, profile state, observe_only flag
+  gradient_status          — gradient health, profile state, observe_only flag
   gradient_alignment_score — evaluate a text and return score + verdict
-  gradient_drift_status   — rolling window stats
-  gradient_alignment_log  — recent evaluation log
-  gradient_alert          — current alert status
+  gradient_drift_status    — rolling window stats
+  gradient_alignment_log   — recent evaluation log
+  gradient_alert           — current alert status
 
 Observability tools (v0.6):
   ops_status              — single-call dashboard: vault + classification + drift + alignment
   gradient_history        — last N alignment verdicts from PostgreSQL
   drift_status            — drift window history from PostgreSQL
+
+Honeypot tools (v0.9):
+  gradient_honeypot_status — registered patterns, recent alerts, lockdown state
+  gradient_honeypot_clear  — (only registered when lockdown_mode: true) clears lockdown
 """
 
 from __future__ import annotations
@@ -33,6 +37,7 @@ from openstinger.config import load_config
 from openstinger.gradient.alignment_profile import AlignmentProfileBuilder
 from openstinger.gradient.correction_engine import CorrectionEngine
 from openstinger.gradient.drift_detector import DriftDetector
+from openstinger.gradient.honeypot.detector import HoneypotDetector
 from openstinger.gradient.interceptor import GradientInterceptor
 from openstinger.scaffold.mcp.server import ScaffoldServer, ALL_TOOLS as TIER2_TOOLS
 
@@ -112,13 +117,29 @@ GRADIENT_TOOLS = [
             },
         },
     ),
+    # v0.9 Honeypot tools
+    types.Tool(
+        name="gradient_honeypot_status",
+        description=(
+            "Returns the current honeypot state: registered pattern counts, recent alerts, "
+            "and whether lockdown is active. Use this after any anomalous retrieval behaviour "
+            "to check whether a probe was detected."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "agent_namespace": {"type": "string", "default": "main"},
+                "limit": {"type": "integer", "default": 10, "description": "Recent alerts to return"},
+            },
+        },
+    ),
 ]
 
 ALL_TOOLS = TIER2_TOOLS + GRADIENT_TOOLS
 
 
 class GradientServer:
-    """Tier 3 MCP server wrapping Tier 1+2 + adding Gradient tools."""
+    """Tier 3 MCP server wrapping Tier 1+2 + adding Gradient + Honeypot tools."""
 
     def __init__(self, cfg: Any) -> None:
         self.cfg = cfg
@@ -126,6 +147,8 @@ class GradientServer:
         self.tier2: Any = None
         self.interceptor: Any = None
         self.drift_detector: Any = None
+        self.honeypot_detector: Any = None  # v0.9
+        self._lockdown_active: bool = False  # v0.9
         self._register_handlers()
 
     def _register_handlers(self) -> None:
@@ -135,10 +158,25 @@ class GradientServer:
 
         @self.mcp.call_tool()
         async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
+            # v0.9: lockdown check — refuse all calls when lockdown is active
+            if self._lockdown_active and name not in ("gradient_honeypot_clear", "gradient_honeypot_status"):
+                result = {"error": "honeypot_lockdown", "message": "System locked down due to honeypot trigger. Use gradient_honeypot_clear to resume."}
+                return [types.TextContent(type="text", text=json.dumps(result))]
             result = await self._dispatch(name, arguments)
             return [types.TextContent(type="text", text=json.dumps(result, default=str))]
 
     async def _dispatch(self, name: str, args: dict) -> Any:
+        # v0.9: honeypot pre-execution hook on retrieval tools
+        if name in ("memory_search", "memory_get_entity", "knowledge_search"):
+            if self.honeypot_detector is not None:
+                ns = args.get("agent_namespace") or self.cfg.agent_namespace
+                query = args.get("query") or args.get("uuid") or ""
+                alert = self.honeypot_detector.check(query, tool=name, agent_namespace=ns)
+                if alert:
+                    await self._handle_honeypot_alert(alert)
+                    if self.cfg.gradient.honeypot.suppress_response:
+                        return {"results": [], "honeypot_triggered": True}
+
         # Route all Tier 1+2 tools to the Scaffold server
         if (name.startswith("memory_")
                 or name.startswith("vault_")
@@ -187,6 +225,13 @@ class GradientServer:
                     args.get("agent_namespace", self.cfg.agent_namespace),
                     int(args.get("limit", 5)),
                 )
+            case "gradient_honeypot_status":
+                return await self._honeypot_status(
+                    args.get("agent_namespace", self.cfg.agent_namespace),
+                    int(args.get("limit", 10)),
+                )
+            case "gradient_honeypot_clear":
+                return await self._honeypot_clear(args.get("auth_code", ""))
             case _:
                 return {"error": f"Unknown tool: {name}"}
 
@@ -198,6 +243,9 @@ class GradientServer:
             "profile_state": profile.state if profile else "not_built",
             "namespace": self.cfg.agent_namespace,
             "evaluation_timeout_ms": self.cfg.gradient.evaluation_timeout_ms,
+            # v0.9: honeypot state (spec §7 — no breaking change, new fields only)
+            "honeypot_enabled":         self.cfg.gradient.honeypot.enabled,
+            "honeypot_lockdown_active": self._lockdown_active,
         }
 
     async def _get_alignment_log(self, limit: int = 20) -> list:
@@ -243,11 +291,30 @@ class GradientServer:
         """v0.6: Single-call operational dashboard."""
         db = self.tier2.tier1.db
         try:
-            # Vault notes by category
+            # Vault notes by category — primary source: PostgreSQL
             notes = await db.list_vault_notes(namespace)
             note_counts: dict = {}
             for n in notes:
                 note_counts[n.category] = note_counts.get(n.category, 0) + 1
+
+            # PostgreSQL vault sync may lag behind FalkorDB (e.g. after direct vault_note_add).
+            # If PostgreSQL shows 0 notes, fall back to FalkorDB category counts.
+            if not note_counts:
+                try:
+                    vault_engine = self.tier2.vault_engine
+                    if vault_engine:
+                        stats = await vault_engine.get_vault_stats()
+                        for cat, v in stats.items():
+                            active = v.get("active", 0)
+                            if active:
+                                note_counts[cat] = active
+                        if note_counts:
+                            logger.info(
+                                "ops_status: PostgreSQL vault empty for ns=%s, using FalkorDB counts",
+                                namespace,
+                            )
+                except Exception as fb_exc:
+                    logger.debug("ops_status FalkorDB fallback error: %s", fb_exc)
 
             # Last classification cycle
             class_log = await db.get_classification_history(namespace, limit=1)
@@ -382,11 +449,139 @@ class GradientServer:
             return result
         self.tier2._vault_sync_now = sync_and_refresh
 
-        logger.info("Gradient server ready: namespace=%s observe_only=%s",
-                    cfg.agent_namespace, cfg.gradient.observe_only)
+        # v0.9: Honeypot detector
+        self.honeypot_detector = HoneypotDetector(cfg)
+
+        # Register gradient_honeypot_clear only when lockdown_mode = true
+        if cfg.gradient.honeypot.lockdown_mode:
+            ALL_TOOLS.append(
+                types.Tool(
+                    name="gradient_honeypot_clear",
+                    description=(
+                        "Clear an active honeypot lockdown. Requires the operator auth_code "
+                        "set in gradient.honeypot.lockdown_auth_code. Only available when "
+                        "lockdown_mode: true."
+                    ),
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "auth_code": {"type": "string", "description": "Operator auth code to clear lockdown"},
+                        },
+                        "required": ["auth_code"],
+                    },
+                )
+            )
+
+        logger.info("Gradient server ready: namespace=%s observe_only=%s honeypot=%s",
+                    cfg.agent_namespace, cfg.gradient.observe_only,
+                    "enabled" if cfg.gradient.honeypot.enabled else "disabled")
 
     async def shutdown(self) -> None:
         await self.tier2.shutdown()
+
+    # ------------------------------------------------------------------
+    # v0.9 Honeypot handlers
+    # ------------------------------------------------------------------
+
+    async def _handle_honeypot_alert(self, alert: Any) -> None:
+        """
+        Persist alert to DB, write hard_block alignment event, optionally set lockdown.
+        Per spec §4.3 steps 1-4.
+        """
+        db = self.tier2.tier1.db
+        ns = alert.agent_namespace
+        suppressed = bool(self.cfg.gradient.honeypot.suppress_response)
+        lockdown_triggered = False
+
+        # 1. Write honeypot_alerts row
+        try:
+            await db.log_honeypot_alert(
+                agent_namespace    = ns,
+                tool_called        = alert.tool_called,
+                query_text         = alert.query_text,
+                matched_pattern    = alert.matched_pattern,
+                pattern_source     = alert.pattern_source,
+                suppressed         = suppressed,
+                lockdown_triggered = lockdown_triggered,
+            )
+        except Exception as exc:
+            logger.error("Failed to persist honeypot_alert: %s", exc)
+
+        # 2. Write alignment_events row with verdict=hard_block / violation_type=honeypot
+        try:
+            await db.log_alignment_event(
+                agent_namespace = ns,
+                verdict         = "hard_block",
+                scores          = {},
+                issues          = [f"honeypot:{alert.matched_pattern}({alert.pattern_source})"],
+                corrected       = False,
+                profile_state   = "honeypot",
+            )
+        except Exception as exc:
+            logger.error("Failed to write honeypot alignment_event: %s", exc)
+
+        # 3. Feed into drift detector (counts as hard_block event)
+        if self.drift_detector is not None:
+            try:
+                self.drift_detector.record(score=0.0, verdict="hard_block")
+            except Exception:
+                pass
+
+        # 4. Lockdown if configured
+        if self.cfg.gradient.honeypot.lockdown_mode:
+            self._lockdown_active = True
+            logger.error(
+                "HONEYPOT LOCKDOWN ACTIVATED for namespace=%s — all tools blocked until cleared.", ns
+            )
+
+    async def _honeypot_status(self, agent_namespace: str, limit: int = 10) -> dict:
+        """Handler for gradient_honeypot_status tool."""
+        db = self.tier2.tier1.db
+        detector = self.honeypot_detector
+
+        # Recent alerts
+        recent_alerts: list[dict] = []
+        total_alerts = 0
+        try:
+            rows = await db.get_honeypot_alerts(agent_namespace, limit=limit)
+            total_count_rows = await db.get_honeypot_alerts(agent_namespace, limit=10_000)
+            total_alerts = len(total_count_rows)
+            recent_alerts = [
+                {
+                    "tool_called":     r.tool_called,
+                    "query_text":      r.query_text,
+                    "matched_pattern": r.matched_pattern,
+                    "pattern_source":  r.pattern_source,
+                    "suppressed":      bool(r.suppressed),
+                    "created_at":      r.created_at,
+                }
+                for r in rows
+            ]
+        except Exception as exc:
+            logger.debug("honeypot_status DB read error: %s", exc)
+
+        return {
+            "enabled":         detector.enabled if detector else False,
+            "lockdown_active": self._lockdown_active,
+            "pattern_count":   detector.pattern_count if detector else {"default": 0, "custom": 0},
+            "recent_alerts":   recent_alerts,
+            "total_alerts_all_time": total_alerts,
+        }
+
+    async def _honeypot_clear(self, auth_code: str) -> dict:
+        """Handler for gradient_honeypot_clear tool. Only effective when lockdown_mode=true."""
+        if not self.cfg.gradient.honeypot.lockdown_mode:
+            return {"error": "lockdown_mode is not enabled in config — nothing to clear"}
+        expected = self.cfg.gradient.honeypot.lockdown_auth_code or ""
+        if not expected:
+            return {"error": "lockdown_auth_code not set in gradient.honeypot config"}
+        if auth_code != expected:
+            return {"error": "invalid auth_code"}
+        self._lockdown_active = False
+        logger.info("Honeypot lockdown cleared by operator (auth_code accepted)")
+        return {"success": True, "lockdown_active": False}
+
+
 
 
 async def _run_stdio(cfg: Any) -> None:
@@ -404,8 +599,10 @@ async def _run_stdio(cfg: Any) -> None:
 
 
 async def _run_sse(cfg: Any) -> None:
+    import contextlib
     import uvicorn
     from mcp.server.sse import SseServerTransport
+    from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
     from starlette.applications import Starlette
     from starlette.responses import Response
     from starlette.routing import Mount, Route
@@ -414,6 +611,7 @@ async def _run_sse(cfg: Any) -> None:
     server = GradientServer(cfg)
     await server.startup()
 
+    # --- Legacy SSE transport (Cursor, Claude Desktop, etc.) ---
     sse = SseServerTransport("/messages/")
     init_opts = server.mcp.create_initialization_options()
 
@@ -424,10 +622,28 @@ async def _run_sse(cfg: Any) -> None:
             await server.mcp.run(streams[0], streams[1], init_opts)
         return Response()
 
-    app = Starlette(routes=[
-        Route("/sse", endpoint=handle_sse, methods=["GET"]),
-        Mount("/messages/", app=sse.handle_post_message),
-    ])
+    # --- Streamable HTTP transport (mcporter, Claude Code, newer clients) ---
+    session_manager = StreamableHTTPSessionManager(
+        app=server.mcp,
+        stateless=True,  # each request is independent — no resumability needed
+    )
+
+    async def handle_streamable_http(request: AnyType) -> None:
+        await session_manager.handle_request(request.scope, request.receive, request._send)
+
+    @contextlib.asynccontextmanager
+    async def lifespan(app: AnyType):
+        async with session_manager.run():
+            yield
+
+    app = Starlette(
+        lifespan=lifespan,
+        routes=[
+            Route("/sse", endpoint=handle_sse, methods=["GET"]),
+            Mount("/messages/", app=sse.handle_post_message),
+            Route("/mcp", endpoint=handle_streamable_http, methods=["GET", "POST", "DELETE"]),
+        ],
+    )
 
     try:
         uvi_config = uvicorn.Config(

@@ -1,6 +1,6 @@
 # OpenStinger + OpenClaw
 
-OpenClaw is the origin of the \*Claw ecosystem — 207k+ GitHub stars, the largest community, and the most feature-complete agent runtime. OpenStinger was originally built alongside OpenClaw and has the deepest integration with it.
+OpenClaw is the origin of the \*Claw ecosystem ï¿½ 207k+ GitHub stars, the largest community, and the most feature-complete agent runtime. OpenStinger was originally built alongside OpenClaw and has the deepest integration with it.
 
 ## What OpenStinger adds to OpenClaw
 
@@ -54,7 +54,7 @@ ingestion:
 
 ### 4. Add OpenStinger to Claudia's SKILL.md
 
-Add a `SKILL.md` to `openclaw-data/workspace/skills/openstinger/SKILL.md` so Claudia knows how to use all 30 tools. See [the OpenStinger repo](../README.md#mcp-tools) for the full tool reference.
+Add a `SKILL.md` to `openclaw-data/workspace/skills/openstinger/SKILL.md` so Claudia knows how to use all 32 tools. See [the OpenStinger repo](../README.md#mcp-tools) for the full tool reference.
 
 ## Operational Queries You Can Run Immediately
 
@@ -86,9 +86,9 @@ GROUP BY verdict;
 
 The "Dynamic Gradient (per-output scoring)" row in the table above is a mathematical model, not a philosophical one:
 
-> **dE/dt = ß(C–D)E**
+> **dE/dt = ï¿½(Cï¿½D)E**
 
-**E** = accumulated episodic memory · **ß** = distilled self-knowledge from StingerVault · **C** = agent's own defined constraints · **D** = observed deviation per response. Every output is scored against the agent's own evolving baseline — not a static `SOUL.md` file. Gradient starts in `observe_only = true` by default: always measuring, never blocking, until you're ready.
+**E** = accumulated episodic memory ï¿½ **ï¿½** = distilled self-knowledge from StingerVault ï¿½ **C** = agent's own defined constraints ï¿½ **D** = observed deviation per response. Every output is scored against the agent's own evolving baseline ï¿½ not a static `SOUL.md` file. Gradient starts in `observe_only = true` by default: always measuring, never blocking, until you're ready.
 
 ---
 
@@ -96,7 +96,7 @@ The "Dynamic Gradient (per-output scoring)" row in the table above is a mathemat
 
 ? **[Full integration modes guide with config snippets](INTEGRATION_MODES.md)**
 
-**Recommended for OpenClaw:** Start with **Mode 1 (Alongside)** — QMD and Graphiti stay active. Let OpenStinger ingest 1,000+ episodes, then update your system prompt to **Mode 2 (Primary)**: OpenStinger answers first, QMD is the fallback.
+**Recommended for OpenClaw:** Start with **Mode 1 (Alongside)** ï¿½ QMD and Graphiti stay active. Let OpenStinger ingest 1,000+ episodes, then update your system prompt to **Mode 2 (Primary)**: OpenStinger answers first, QMD is the fallback.
 
 ---
 

@@ -1,12 +1,12 @@
 # Agent Skills Template for OpenStinger
 
-A runtime-agnostic guide for teaching any MCP-compatible agent how to use OpenStinger's 30 tools effectively. Copy and adapt this into your agent's system prompt, skills file, or tool-use instructions.
+A runtime-agnostic guide for teaching any MCP-compatible agent how to use OpenStinger's 32 tools effectively. Copy and adapt this into your agent's system prompt, skills file, or tool-use instructions.
 
 ---
 
 ## Overview
 
-OpenStinger exposes 30 tools across three tiers. Each tier is additive — Tier 1 works standalone, Tier 2 builds on Tier 1, Tier 3 requires Tier 2 data to be useful.
+OpenStinger exposes 32 tools across three tiers. Each tier is additive — Tier 1 works standalone, Tier 2 builds on Tier 1, Tier 3 requires Tier 2 data to be useful.
 
 | Tier | Name | Tools | When it becomes useful |
 |---|---|---|---|

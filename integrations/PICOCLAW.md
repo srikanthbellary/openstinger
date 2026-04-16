@@ -20,7 +20,7 @@ PicoClaw deliberately ships without a persistent memory layer to stay lightweigh
 
 ```bash
 docker compose up -d   # starts FalkorDB, PostgreSQL, Adminer
-python -m openstinger.gradient.mcp.server   # Tier 3 (all 30 tools)
+python -m openstinger.gradient.mcp.server   # Tier 3 (all 32 tools)
 ```
 
 For Tier 1 only (memory, no vault/gradient):

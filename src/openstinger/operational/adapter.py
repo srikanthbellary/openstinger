@@ -29,6 +29,7 @@ from openstinger.operational.models import (
     DriftLog,
     EntityRegistryRow,
     EpisodeLog,
+    HoneypotAlertRow,
     IngestionJob,
     SessionState,
     SyncLog,
@@ -45,7 +46,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 class OperationalDBAdapter(ABC):
-    """Abstract operational database interface. All 12 tables across 3 tiers + agents."""
+    """Abstract operational database interface. All 13 tables across 3 tiers + agents."""
 
     @abstractmethod
     async def init(self) -> None:
@@ -154,6 +155,25 @@ class OperationalDBAdapter(ABC):
     # -- CorrectionLog (Tier 3) --
     @abstractmethod
     async def log_correction(self, agent_namespace: str, alignment_event_uuid: str, original_text_hash: str, corrected_text_hash: str, re_eval_verdict: str | None, issues: list[str], succeeded: bool) -> None: ...
+
+    # -- HoneypotAlertRow (Tier 3, v0.9) --
+    @abstractmethod
+    async def log_honeypot_alert(
+        self,
+        agent_namespace: str,
+        tool_called:     str,
+        query_text:      str,
+        matched_pattern: str,
+        pattern_source:  str,
+        suppressed:      bool = True,
+        lockdown_triggered: bool = False,
+    ) -> None: ...
+    @abstractmethod
+    async def get_honeypot_alerts(
+        self,
+        agent_namespace: str,
+        limit:           int = 10,
+    ) -> list[HoneypotAlertRow]: ...
 
 
 # ---------------------------------------------------------------------------
@@ -688,6 +708,50 @@ class SQLAlchemyAdapter(OperationalDBAdapter):
             )
             session.add(row)
             await session.commit()
+
+
+    async def log_honeypot_alert(
+        self,
+        agent_namespace:    str,
+        tool_called:        str,
+        query_text:         str,
+        matched_pattern:    str,
+        pattern_source:     str,
+        suppressed:         bool = True,
+        lockdown_triggered: bool = False,
+    ) -> None:
+        """Persist a honeypot pattern match to the operational DB (v0.9)."""
+        row = HoneypotAlertRow(
+            agent_namespace    = agent_namespace,
+            tool_called        = tool_called,
+            query_text         = query_text,
+            matched_pattern    = matched_pattern,
+            pattern_source     = pattern_source,
+            suppressed         = int(suppressed),
+            lockdown_triggered = int(lockdown_triggered),
+        )
+        async with self._session_factory() as session:
+            session.add(row)
+            try:
+                await session.commit()
+            except Exception as exc:
+                await session.rollback()
+                logger.debug("honeypot_alert log failed: %s", exc)
+
+    async def get_honeypot_alerts(
+        self,
+        agent_namespace: str,
+        limit:           int = 10,
+    ) -> list[HoneypotAlertRow]:
+        """Return recent honeypot alerts for a namespace, newest first (v0.9)."""
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(HoneypotAlertRow)
+                .where(HoneypotAlertRow.agent_namespace == agent_namespace)
+                .order_by(HoneypotAlertRow.id.desc())
+                .limit(limit)
+            )
+            return list(result.scalars().all())
 
 
 # ---------------------------------------------------------------------------
