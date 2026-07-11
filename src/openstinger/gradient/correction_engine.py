@@ -14,6 +14,7 @@ import logging
 from typing import Any
 
 from openstinger.gradient.alignment_profile import AlignmentProfile
+from openstinger.utils.retry import with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,22 @@ class CorrectionEngine:
         self.llm = llm
         self.interceptor = interceptor  # For re-evaluation
 
+    @with_retry(max_attempts=3, base_delay=1.0, max_delay=30.0, jitter=True)
+    async def _llm_rewrite(
+        self, profile: AlignmentProfile, issues: list[str], original_text: str
+    ) -> str:
+        """
+        LLM rewrite call — isolated so @with_retry can catch and retry on failure.
+        Re-raises on exception so the retry decorator sees it.
+        """
+        corrected = await self.llm.complete(
+            system=CORRECT_SYSTEM,
+            user=_build_correct_user(profile, issues, original_text),
+        )
+        if not corrected.strip():
+            raise ValueError("LLM returned empty correction")
+        return corrected
+
     async def correct(
         self,
         original_text: str,
@@ -63,15 +80,9 @@ class CorrectionEngine:
         """
         import hashlib
         try:
-            corrected = await self.llm.complete(
-                system=CORRECT_SYSTEM,
-                user=_build_correct_user(profile, issues, original_text),
-            )
+            corrected = await self._llm_rewrite(profile, issues, original_text)
         except Exception as exc:
-            logger.warning("CorrectionEngine: rewrite failed: %s", exc)
-            return original_text, False
-
-        if not corrected.strip():
+            logger.warning("CorrectionEngine: rewrite failed after retries: %s", exc)
             return original_text, False
 
         # Re-evaluate with correction engine temporarily disabled (prevents infinite recursion).

@@ -11,6 +11,7 @@ import logging
 from typing import Any
 
 from openstinger.gradient.alignment_profile import AlignmentProfile
+from openstinger.utils.retry import with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -40,19 +41,26 @@ class ValueCoherenceScorer:
     def __init__(self, llm: Any) -> None:
         self.llm = llm
 
+    @with_retry(max_attempts=3, base_delay=1.0, max_delay=30.0, jitter=True)
+    async def _score_llm(
+        self, response_text: str, profile: AlignmentProfile
+    ) -> dict:
+        """LLM scoring call — isolated so @with_retry can work."""
+        return await self.llm.complete_json(
+            system=SYSTEM,
+            user=_build_user(profile, response_text),
+            use_fast_model=True,
+        )
+
     async def score(self, response_text: str, profile: AlignmentProfile) -> dict:
         """Returns {"score": float, "reasoning": str}"""
         if not profile.is_usable:
             return {"score": 1.0, "reasoning": "profile_insufficient_skipped", "skipped": True}
 
         try:
-            result = await self.llm.complete_json(
-                system=SYSTEM,
-                user=_build_user(profile, response_text),
-                use_fast_model=True,
-            )
+            result = await self._score_llm(response_text, profile)
             score = max(0.0, min(1.0, float(result.get("score", 1.0))))
             return {"score": score, "reasoning": result.get("reasoning", "")}
         except Exception as exc:
-            logger.warning("ValueCoherenceScorer failed: %s", exc)
+            logger.warning("ValueCoherenceScorer failed after retries: %s", exc)
             return {"score": 1.0, "reasoning": f"evaluation_error: {exc}", "error": True}

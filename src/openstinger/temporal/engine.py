@@ -12,6 +12,7 @@ Adapted from graphiti-core v0.24.0 graphiti.py (renamed engine.py):
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -135,11 +136,17 @@ class TemporalEngine:
         self._deduplicator: Optional[Any] = None
         self._conflict_resolver: Optional[Any] = None
 
+        # v0.9 — write policy (lazy import; wired after server config is available)
+        self._write_policy: Optional[Any] = None
+
     def set_deduplicator(self, deduplicator: Any) -> None:
         self._deduplicator = deduplicator
 
     def set_conflict_resolver(self, conflict_resolver: Any) -> None:
         self._conflict_resolver = conflict_resolver
+
+    def set_write_policy(self, write_policy: Any) -> None:  # v0.9
+        self._write_policy = write_policy
 
     # ------------------------------------------------------------------
     # Ontology preprocessing hook
@@ -285,8 +292,10 @@ class TemporalEngine:
                 )
                 await self._persist_episodic_edge(ep_edge)
 
+        episode.entity_count = len(deduped_entities)
+        episode.edge_count = len(raw_edges)
         logger.info("Episode ingested: %s (%d entities, %d edges)",
-                    episode.uuid[:8], len(deduped_entities), len(raw_edges))
+                    episode.uuid[:8], episode.entity_count, episode.edge_count)
         return episode
 
     # ------------------------------------------------------------------
@@ -523,12 +532,31 @@ class TemporalEngine:
         )
         ranked = sorted(all_results, key=lambda x: x.get("score", 0), reverse=True)[:limit]
 
-        return {
+        _result = {
             "episodes": episodes_final,
             "entities": entity_sim,
             "facts": fact_sim,
             "ranked": ranked,
         }
+
+        # v0.9: fire-and-forget access_count increment on returned episodes
+        _returned_uuids = [ep["uuid"] for ep in episodes_final if ep.get("uuid")]
+        if _returned_uuids:
+            asyncio.create_task(self._increment_access_counts(_returned_uuids))
+
+        return _result
+
+    # v0.9: fire-and-forget access_count increment on returned episodes
+    async def _increment_access_counts(self, uuids: list[str]) -> None:
+        for uuid in uuids:
+            try:
+                await self.driver.query_temporal(
+                    "MATCH (ep:Episode {uuid: $uuid}) "
+                    "SET ep.access_count = coalesce(ep.access_count, 0) + 1",
+                    {"uuid": uuid},
+                )
+            except Exception:
+                pass  # Never block a result due to increment failure
 
     async def get_entity(self, uuid: str) -> Optional[dict]:
         rows = await self.driver.query_temporal(
@@ -690,3 +718,99 @@ class TemporalEngine:
             return int(dt.timestamp())
         except (ValueError, TypeError):
             return None
+
+    # ------------------------------------------------------------------
+    # v0.9 — Similarity search (prerequisite for WritePolicy)
+    # ------------------------------------------------------------------
+
+    async def find_similar_episodes(
+        self,
+        content:         str,
+        agent_namespace: str | None = None,
+        threshold:       float = 0.95,
+        limit:           int = 1,
+    ) -> list[dict]:
+        """
+        Vector similarity search for near-duplicate episode detection.
+        Returns list of {uuid, score} dicts where score >= threshold.
+
+        NOTE: FalkorDB returns cosine DISTANCE (lower = more similar).
+              We convert to similarity: similarity = 1.0 - distance.
+              Fail-open: returns [] on any error to avoid blocking writes.
+        """
+        namespace = agent_namespace or self.agent_namespace
+        try:
+            embedding = await self.embedder.embed(content)
+            rows = await self.driver.query_temporal(
+                """
+                CALL db.idx.vector.queryNodes('Episode', 'content_embedding', $limit, vecf32($embedding))
+                YIELD node, score
+                WHERE node.agent_namespace = $namespace
+                RETURN node.uuid AS uuid, (1.0 - score) AS score
+                """,
+                {"embedding": embedding, "namespace": namespace, "limit": limit},
+            )
+            return [r for r in rows if r.get("score", 0) >= threshold]
+        except Exception as exc:
+            logger.debug("find_similar_episodes failed (fail-open): %s", exc)
+            return []
+
+    # ------------------------------------------------------------------
+    # v0.9 — memory_wake_up context builder
+    # ------------------------------------------------------------------
+
+    async def get_wake_up_context(
+        self,
+        agent_namespace:        str | None = None,
+        max_episodes:           int   = 5,
+        max_notes:              int   = 3,
+        min_episode_confidence: float = 0.85,
+    ) -> dict:
+        """
+        Returns L0 context for session boot injection.
+        L0 episodes = highest access_count in this namespace at or above confidence.
+        L0 vault notes = best-effort (only available at Tier 2/3 — returns [] at Tier 1).
+        """
+        namespace = agent_namespace or self.agent_namespace
+
+        episode_rows = await self.driver.query_temporal(
+            """
+            MATCH (ep:Episode {agent_namespace: $namespace})
+            WHERE ep.confidence >= $min_confidence
+            RETURN ep.uuid        AS uuid,
+                   ep.content     AS content,
+                   ep.valid_at    AS valid_at,
+                   ep.access_count AS access_count,
+                   ep.confidence  AS confidence
+            ORDER BY ep.access_count DESC
+            LIMIT $limit
+            """,
+            {
+                "namespace":      namespace,
+                "min_confidence": min_episode_confidence,
+                "limit":          max_episodes,
+            },
+        )
+
+        # Best-effort vault notes (always [] at Tier 1 — Tier 2/3 override in dispatch)
+        l0_notes: list[dict] = []
+
+        total = await self._count_episodes(namespace)
+
+        from datetime import datetime, timezone as _tz
+        return {
+            "agent_namespace":          namespace,
+            "session_injected_at":      datetime.now(_tz.utc).isoformat(),
+            "l0_episodes":              episode_rows,
+            "l0_vault_notes":           l0_notes,
+            "total_episodes_available": total,
+            "injected_episode_count":   len(episode_rows),
+            "injected_note_count":      len(l0_notes),
+        }
+
+    async def _count_episodes(self, agent_namespace: str) -> int:
+        rows = await self.driver.query_temporal(
+            "MATCH (ep:Episode {agent_namespace: $namespace}) RETURN count(ep) AS total",
+            {"namespace": agent_namespace},
+        )
+        return rows[0]["total"] if rows else 0

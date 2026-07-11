@@ -1,7 +1,7 @@
 """
 Tier 1 MCP server — OpenStinger memory harness.
 
-Exposes 11 MCP tools. Supports stdio (default) and TCP transport.
+Exposes 12 MCP tools (v0.9: +memory_wake_up). Supports stdio (default) and TCP transport.
 
 Startup sequence:
   1. Load config (config.yaml + .env)
@@ -51,6 +51,8 @@ from openstinger.temporal.entity_registry import EntityRegistry
 from openstinger.temporal.falkordb_driver import wait_for_falkordb
 from openstinger.temporal.openai_embedder import OpenAIEmbedder
 from openstinger.storage.embedding_cache import CachedEmbedder, EmbeddingCache
+from openstinger.utils.circuit_breaker import CircuitBreaker
+from openstinger.utils.timeout import with_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -209,6 +211,30 @@ TOOL_SCHEMAS: list[types.Tool] = [
             "required": ["episode_uuid", "new_content"],
         },
     ),
+    types.Tool(
+        name="memory_wake_up",
+        description=(
+            "Call once at session start. Returns your highest-confidence episodic memories "
+            "and vault identity notes as a compact context primer. Use this to orient yourself "
+            "before beginning work — surfaces what matters most without requiring search queries."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "max_episodes": {
+                    "type":        "integer",
+                    "description": "Max L0 episodes to return (default: 5)",
+                    "default":     5,
+                },
+                "max_notes": {
+                    "type":        "integer",
+                    "description": "Max vault identity notes to return (default: 3)",
+                    "default":     3,
+                },
+            },
+            "required": [],
+        },
+    ),
 ]
 
 
@@ -232,6 +258,10 @@ class OpenStingerServer:
         self.engine: Any = None
         self.scheduler: Any = None
 
+        # v0.9 — circuit breakers (instantiated in startup after config is loaded)
+        self.falkordb_breaker: Any = None
+        self.embedding_breaker: Any = None
+
         self._register_handlers()
 
     def _register_handlers(self) -> None:
@@ -248,13 +278,14 @@ class OpenStingerServer:
             return [types.TextContent(type="text", text=json.dumps(result, default=str))]
 
     async def _dispatch(self, name: str, args: dict) -> Any:
+        _timeout = self.cfg.resilience.tool_timeout_seconds
         match name:
             case "memory_add":
-                return await memory_add(self.engine, self.db, **args)
+                return await with_timeout(_timeout)(memory_add)(self.engine, self.db, **args)
             case "memory_query":
-                return await memory_query(self.engine, **args)
+                return await with_timeout(_timeout)(memory_query)(self.engine, **args)
             case "memory_search":
-                return await memory_search(self.engine, **args)
+                return await with_timeout(_timeout)(memory_search)(self.engine, **args)
             case "memory_get_entity":
                 return await memory_get_entity(self.engine, **args)
             case "memory_get_episode":
@@ -262,7 +293,7 @@ class OpenStingerServer:
             case "memory_job_status":
                 return await memory_job_status(self.db, **args)
             case "memory_ingest_now":
-                return await memory_ingest_now(self.scheduler, **args)
+                return await with_timeout(_timeout)(memory_ingest_now)(self.scheduler, **args)
             case "memory_namespace_status":
                 return await memory_namespace_status(self.engine, self.db, **args)
             case "memory_list_agents":
@@ -270,7 +301,13 @@ class OpenStingerServer:
             case "memory_delete":
                 return await memory_delete(self.engine, self.db, **args)
             case "memory_update":
-                return await memory_update(self.engine, **args)
+                return await with_timeout(_timeout)(memory_update)(self.engine, **args)
+            case "memory_wake_up":
+                return await with_timeout(_timeout)(self.engine.get_wake_up_context)(
+                    agent_namespace=self.cfg.agent_namespace,
+                    max_episodes=args.get("max_episodes", 5),
+                    max_notes=args.get("max_notes", 3),
+                )
             case _:
                 return {"error": f"Unknown tool: {name}"}
 
@@ -278,6 +315,20 @@ class OpenStingerServer:
         """Full startup sequence."""
         cfg = self.cfg
         logger.info("OpenStinger starting up: agent=%s", cfg.agent_name)
+
+        # v0.9: circuit breakers — instantiate before any infrastructure connections
+        self.falkordb_breaker  = CircuitBreaker(
+            name="falkordb",
+            failure_threshold=cfg.resilience.circuit_breaker_failure_threshold,
+            recovery_timeout =cfg.resilience.circuit_breaker_recovery_timeout,
+            success_threshold=cfg.resilience.circuit_breaker_success_threshold,
+        )
+        self.embedding_breaker = CircuitBreaker(
+            name="embedding",
+            failure_threshold=cfg.resilience.circuit_breaker_failure_threshold,
+            recovery_timeout =cfg.resilience.circuit_breaker_recovery_timeout,
+            success_threshold=cfg.resilience.circuit_breaker_success_threshold,
+        )
 
         # 1. FalkorDB
         self.driver = await wait_for_falkordb(
@@ -364,6 +415,17 @@ class OpenStingerServer:
         conflict_resolver = ConflictResolver(llm=self.llm, driver=self.driver)
         self.engine.set_conflict_resolver(conflict_resolver)
 
+        # v0.9: Write Policy
+        if cfg.ingestion.write_policy_enabled:
+            from openstinger.temporal.write_policy import MemoryWritePolicy
+            self.engine.set_write_policy(
+                MemoryWritePolicy(dedup_threshold=cfg.ingestion.write_policy_dedup_threshold)
+            )
+            logger.info(
+                "WritePolicy enabled (dedup_threshold=%.2f)",
+                cfg.ingestion.write_policy_dedup_threshold,
+            )
+
         # 5. Ingestion scheduler
         self.scheduler = IngestionSchedulerRegistry()
         await self.scheduler.register_agent(
@@ -377,6 +439,16 @@ class OpenStingerServer:
             session_format=cfg.ingestion.session_format,
             concurrency=cfg.ingestion.concurrency,
         )
+
+        # v0.9 Feature 7: backfill access_count = 0 on any Episode nodes that lack it
+        try:
+            await self.driver.query_temporal(
+                "MATCH (ep:Episode) WHERE ep.access_count IS NULL SET ep.access_count = 0",
+                {},
+            )
+            logger.info("access_count backfill complete")
+        except Exception as _e:
+            logger.warning("access_count backfill failed (non-fatal): %s", _e)
 
         logger.info("OpenStinger ready: namespace=%s", cfg.agent_namespace)
 

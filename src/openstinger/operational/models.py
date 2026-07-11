@@ -3,7 +3,7 @@ SQLAlchemy ORM models for the operational database.
 
 Spec: docs/05_OPERATIONAL_DB_SCHEMA.md
 
-All 11 tables across 3 tiers (additive — each tier adds tables, never removes):
+All 13 tables across 3 tiers (additive — each tier adds tables, never removes):
 
   Tier 1 (4 tables):
     ingestion_jobs   — ingestion pipeline job lifecycle tracking
@@ -165,6 +165,9 @@ class EpisodeLog(Base):
     ingestion_job_uuid: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
     created_at: Mapped[int] = mapped_column(BigInteger, default=_now)
     valid_at: Mapped[int] = mapped_column(BigInteger, default=_now)
+    # v0.9 — hash-chained write provenance (nullable for backcompat)
+    provenance_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    previous_hash:   Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
 
 
 # ---------------------------------------------------------------------------
@@ -436,3 +439,32 @@ class CorrectionLog(Base):
         kwargs.setdefault("correction_succeeded", 0)
         kwargs.setdefault("corrected_at", _now())
         super().__init__(**kwargs)
+
+
+# ---------------------------------------------------------------------------
+# TIER 3 — honeypot_alerts  (v0.9: GradientHoneypot)
+# ---------------------------------------------------------------------------
+
+class HoneypotAlertRow(Base):
+    """
+    One row per honeypot pattern match. Written by GradientHoneypot pre-execution hook.
+    Schema matches spec §5 exactly.
+    """
+    __tablename__ = "honeypot_alerts"
+
+    id:                 Mapped[int]           = mapped_column(Integer, primary_key=True, autoincrement=True)
+    agent_namespace:    Mapped[str]           = mapped_column(String(128), nullable=False, index=True)
+    tool_called:        Mapped[str]           = mapped_column(String(64),  nullable=False)
+    query_text:         Mapped[str]           = mapped_column(Text, nullable=False)
+    matched_pattern:    Mapped[str]           = mapped_column(String(256), nullable=False)
+    pattern_source:     Mapped[str]           = mapped_column(String(32),  nullable=False)
+    suppressed:         Mapped[int]           = mapped_column(Integer, nullable=False, default=1)
+    lockdown_triggered: Mapped[int]           = mapped_column(Integer, nullable=False, default=0)
+    created_at:         Mapped[int]           = mapped_column(BigInteger, nullable=False, default=_now)
+
+    def __init__(self, **kwargs: object) -> None:
+        kwargs.setdefault("suppressed", 1)
+        kwargs.setdefault("lockdown_triggered", 0)
+        kwargs.setdefault("created_at", _now())
+        super().__init__(**kwargs)
+

@@ -87,6 +87,7 @@ TIER2_TOOLS = [
                     "enum": ["identity", "domain", "methodology", "preference", "constraint"],
                 },
                 "include_stale": {"type": "boolean", "default": False},
+                "limit": {"type": "integer", "default": 5, "description": "Max notes to return (default 5)"},
             },
         },
     ),
@@ -234,7 +235,21 @@ class ScaffoldServer:
             case "vault_promote_now":
                 return await self.vault_engine.run_classification_cycle()
             case "vault_note_list":
-                return await self.vault_engine.list_notes(**args)
+                # Coerce string booleans — LangGraph/DeerFlow agents may pass "false"/"true"
+                if "include_stale" in args and isinstance(args["include_stale"], str):
+                    args["include_stale"] = args["include_stale"].lower() == "true"
+                limit = int(args.pop("limit", 5))
+                result = await self.vault_engine.list_notes(**args)
+                if result.get("notes"):
+                    notes = result["notes"][:limit]
+                    # Truncate content to 300 chars to keep LLM context manageable
+                    for n in notes:
+                        if n.get("content") and len(n["content"]) > 300:
+                            n["content"] = n["content"][:300] + "…"
+                    result["notes"] = notes
+                    result["count"] = len(notes)
+                    result["total"] = result.get("count", len(notes))
+                return result
             case "vault_note_get":
                 note = await self.vault_engine.get_note(args["uuid"])
                 return note or {"found": False}
@@ -265,6 +280,23 @@ class ScaffoldServer:
                 return await self._namespace_create(name=args["name"])
             case "namespace_archive":
                 return await self._namespace_archive(agent_id=args["agent_id"])
+            case "memory_wake_up":
+                # Tier 2: enrich with vault identity notes if available
+                result = await self.tier1._dispatch("memory_wake_up", args)
+                if isinstance(result, dict) and not result.get("error"):
+                    try:
+                        vault_notes = await self.vault_engine.list_notes(
+                            category="identity", include_stale=False
+                        )
+                        top_notes = (vault_notes.get("notes") or [])[:args.get("max_notes", 3)]
+                        result["l0_vault_notes"] = [
+                            {"uuid": n.get("uuid"), "content": n.get("content", "")[:300]}
+                            for n in top_notes
+                        ]
+                        result["injected_note_count"] = len(top_notes)
+                    except Exception as _exc:
+                        logger.debug("memory_wake_up vault enrichment failed: %s", _exc)
+                return result
             case _:
                 return {"error": f"Unknown tool: {name}"}
 

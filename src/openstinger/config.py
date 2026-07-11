@@ -126,6 +126,20 @@ class IngestionConfig(BaseModel):
     chunk_size: int = 10
     session_format: str = "openclaw"  # "openclaw" | "simple"
     concurrency: int = 5             # max parallel episodes per batch (1=sequential, 10=max)
+    write_policy_enabled: bool = True
+    write_policy_dedup_threshold: float = 0.95
+
+
+class ResilienceConfig(BaseModel):
+    """v0.9 — circuit breaker, timeout, and retry settings."""
+    circuit_breaker_failure_threshold: int   = 5
+    circuit_breaker_recovery_timeout:  int   = 30
+    circuit_breaker_success_threshold: int   = 2
+    tool_timeout_seconds:              float = 30.0
+    retry_max_attempts:                int   = 3
+    retry_base_delay:                  float = 1.0
+    retry_max_delay:                   float = 30.0
+    retry_jitter:                      bool  = True
 
 
 class DeduplicationConfig(BaseModel):
@@ -147,6 +161,16 @@ class VaultConfig(BaseModel):
     episodes_per_classification_batch: int = 20
 
 
+class GradientHoneypotConfig(BaseModel):
+    """v0.9 — Adversarial probe detection via monitored query traps."""
+    enabled:           bool            = True
+    suppress_response: bool            = True   # return empty results on match
+    lockdown_mode:     bool            = False   # escalate to full lockdown on trigger
+    lockdown_auth_code: Optional[str]  = None    # required to clear lockdown if lockdown_mode=True
+    custom_patterns:   list[str]       = []
+    disabled_defaults: list[str]       = []
+
+
 class GradientConfig(BaseModel):
     enabled: bool = False
     observe_only: bool = True
@@ -155,6 +179,7 @@ class GradientConfig(BaseModel):
     drift_alert_threshold: float = 0.65
     consecutive_flag_limit: int = 5
     min_outputs_before_active: int = 100
+    honeypot: GradientHoneypotConfig = Field(default_factory=GradientHoneypotConfig)
 
 
 class MCPConfig(BaseModel):
@@ -187,6 +212,7 @@ class HarnessConfig(BaseModel):
     gradient: GradientConfig = Field(default_factory=GradientConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
+    resilience: ResilienceConfig = Field(default_factory=ResilienceConfig)
 
     # Runtime-resolved paths (set post-init, not from YAML)
     _root_dir: Optional[Path] = None

@@ -28,6 +28,8 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
+from openstinger.utils.retry import with_retry
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -247,6 +249,7 @@ class VaultEngine:
     # Step 2: Extract + Decompose
     # ------------------------------------------------------------------
 
+    @with_retry(max_attempts=3, base_delay=1.0, max_delay=30.0, jitter=True)
     async def _extract_notes(self, episodes: list[dict]) -> list[dict]:
         """LLM extraction of candidate vault notes from episode batch."""
         try:
@@ -258,9 +261,8 @@ class VaultEngine:
             notes = result.get("notes", [])
             # Filter by minimum confidence
             return [n for n in notes if n.get("confidence", 0) >= 0.6]
-        except Exception as exc:
-            logger.warning("VaultEngine: note extraction failed: %s", exc)
-            return []
+        except Exception:
+            raise  # re-raise so @with_retry can catch it
 
     # ------------------------------------------------------------------
     # Step 3: Evolve or Create
@@ -326,6 +328,7 @@ class VaultEngine:
             logger.debug("VaultEngine._find_similar_note failed: %s", exc)
             return None
 
+    @with_retry(max_attempts=3, base_delay=1.0, max_delay=30.0, jitter=True)
     async def _evolve_note(
         self, existing: dict, new_data: dict, episodes: list[dict]
     ) -> None:
@@ -334,18 +337,15 @@ class VaultEngine:
             ep for ep in episodes
             if ep.get("uuid") in new_data.get("related_episodes", [])
         ]
-        try:
-            result = await self.llm.complete_json(
-                system=EVOLVE_NOTE_SYSTEM,
-                user=_build_evolve_user(existing, relevant_episodes),
-            )
-            if result.get("should_update") and result.get("updated_content"):
-                new_content = result["updated_content"]
-                await self._update_note_in_graph(existing["uuid"], new_content)
-                await self._update_note_file(existing["uuid"], existing["category"], new_content)
-                logger.debug("Evolved note %s", existing["uuid"][:8])
-        except Exception as exc:
-            logger.warning("VaultEngine: note evolution failed: %s", exc)
+        result = await self.llm.complete_json(
+            system=EVOLVE_NOTE_SYSTEM,
+            user=_build_evolve_user(existing, relevant_episodes),
+        )
+        if result.get("should_update") and result.get("updated_content"):
+            new_content = result["updated_content"]
+            await self._update_note_in_graph(existing["uuid"], new_content)
+            await self._update_note_file(existing["uuid"], existing["category"], new_content)
+            logger.debug("Evolved note %s", existing["uuid"][:8])
 
     async def _create_note(self, note_data: dict) -> str:
         """Create a new note in the knowledge graph and vault directory."""
@@ -600,8 +600,8 @@ class VaultEngine:
         if category:
             where_parts.append("n.category = $cat")
             params["cat"] = category
-        if not include_stale:
-            where_parts.append("n.stale = 0")
+        # FalkorDB stores integer 0 as boolean false; comparing n.stale = 0 via param
+        # produces no results. Filter stale in Python after query instead.
 
         where = " AND ".join(where_parts)
         rows = await self.driver.query_knowledge(
@@ -615,6 +615,9 @@ class VaultEngine:
             """,
             params,
         )
+
+        if not include_stale:
+            rows = [r for r in rows if not r.get("stale")]
 
         result: dict = {
             "category": category or "all",
