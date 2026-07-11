@@ -68,7 +68,7 @@ Three additive tiers. Start with Tier 1 and unlock the rest as data accumulates.
 |---|---|---|---|
 | **Tier 1** | Memory Harness | 12 | Bi-temporal episodic memory. Every session ingested automatically. Hybrid BM25 + vector semantic search. Date filtering. Numeric/IP search. Delete and update stored memories. Session boot context (`memory_wake_up`). |
 | **Tier 2** | StingerVault | 11 | Autonomous distillation of sessions into structured self-knowledge: identity, domain, methodology, preferences, constraints. External document ingestion (URL, PDF, YouTube). |
-| **Tier 3** | Gradient | 10 | Synchronous alignment evaluation before every response. Drift detection. Correction engine. Adversarial probe detection (GradientHoneypot). 3 new observability tools (v0.7). Starts in observe-only mode. |
+| **Tier 3** | Gradient | 9 | Synchronous alignment evaluation before every response. Drift detection. Correction engine. Adversarial probe detection (GradientHoneypot). Observability tools. Starts in observe-only mode. |
 
 > ⚡ **Tier 3 ships in `observe_only` mode.**
 > It evaluates every response and logs alignment scores — but never blocks or corrects anything until you switch it on.
@@ -257,7 +257,7 @@ OPENAI_API_KEY=ollama
 
 `vault_status` · `vault_sync_now` · `vault_stats` · `vault_promote_now` · `vault_note_list` · `vault_note_get` · `knowledge_ingest` · `namespace_create` · `namespace_list` · `namespace_archive`
 
-### Tier 3 — Gradient (8 tools)
+### Tier 3 — Gradient (9 tools)
 
 | Tool | What it does |
 |---|---|
@@ -270,7 +270,7 @@ OPENAI_API_KEY=ollama
 | `gradient_history` ⭐ | Last N alignment verdicts with scores from PostgreSQL |
 | `drift_status` ⭐ | Behavioral window drift history from PostgreSQL |
 | `gradient_honeypot_status` 🆕 | Registered patterns, recent alerts, lockdown state (v0.9) |
-| `gradient_honeypot_clear` 🆕 | Clear lockdown — only registered when `lockdown_mode: true` (v0.9) |
+| `gradient_honeypot_clear` | Clear lockdown (registered only when `lockdown_mode: true`; not in the default 32) |
 
 **`ops_status` — what one call returns:**
 ```json
@@ -352,9 +352,9 @@ Qwen-Agent  ──┤  OpenStinger MCP Server (Python · port 8766)
 LangGraph   ──┤
 Claude Code ──┤
 Cursor      ──┘
-               ├── Tier 1  memory_query · memory_add ··········· 11 tools
+               ├── Tier 1  memory_query · memory_wake_up ······· 12 tools
                ├── Tier 2  vault_promote_now · vault_note_get   11 tools
-               └── Tier 3  gradient_alignment_score · ops_status 8 tools
+               └── Tier 3  gradient_alignment_score · honeypot  9 tools
                     │                                     ─────────────────
                     │                                     32 tools total
                     ├── FalkorDB    (graph · vectors · episodic memory)
