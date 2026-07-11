@@ -292,8 +292,10 @@ class TemporalEngine:
                 )
                 await self._persist_episodic_edge(ep_edge)
 
+        episode.entity_count = len(deduped_entities)
+        episode.edge_count = len(raw_edges)
         logger.info("Episode ingested: %s (%d entities, %d edges)",
-                    episode.uuid[:8], len(deduped_entities), len(raw_edges))
+                    episode.uuid[:8], episode.entity_count, episode.edge_count)
         return episode
 
     # ------------------------------------------------------------------

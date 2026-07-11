@@ -188,14 +188,15 @@ class SQLAlchemyAdapter(OperationalDBAdapter):
 
     def __init__(self, dsn: str) -> None:
         self._dsn = dsn
-        self._engine = create_async_engine(
-            dsn,
-            echo=False,
-            pool_size=20,
-            max_overflow=10,
-            pool_timeout=10,   # fail fast if pool exhausted during ingestion
-            pool_pre_ping=True,
-        )
+        # SQLite (StaticPool) rejects pool_size / max_overflow / pool_timeout.
+        engine_kwargs: dict = {"echo": False, "pool_pre_ping": True}
+        if not dsn.startswith("sqlite"):
+            engine_kwargs.update(
+                pool_size=20,
+                max_overflow=10,
+                pool_timeout=10,  # fail fast if pool exhausted during ingestion
+            )
+        self._engine = create_async_engine(dsn, **engine_kwargs)
         self._session_factory = async_sessionmaker(
             self._engine, expire_on_commit=False
         )

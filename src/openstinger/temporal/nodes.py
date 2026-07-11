@@ -43,6 +43,9 @@ class EpisodeNode(BaseModel):
     valid_at: int = Field(default_factory=_now_unix)      # when it occurred in the world
     content_embedding: Optional[list[float]] = None       # 1536-dim vector for semantic search
     valid_at_human: str = ""                               # BM25-searchable date e.g. "February 16 2026 February 2026"
+    # Operational-DB audit only — not persisted to FalkorDB (see to_cypher_props)
+    entity_count: int = 0
+    edge_count: int = 0
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -63,7 +66,9 @@ class EpisodeNode(BaseModel):
 
     @classmethod
     def from_cypher_props(cls, props: dict) -> "EpisodeNode":
-        return cls(**props)
+        # Strip audit-only fields if a caller ever passes them through Cypher props
+        clean = {k: v for k, v in props.items() if k not in ("entity_count", "edge_count")}
+        return cls(**clean)
 
 
 # ---------------------------------------------------------------------------
