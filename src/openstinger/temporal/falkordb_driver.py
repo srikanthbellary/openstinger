@@ -221,10 +221,55 @@ class FalkorDBDriver:
         Safely ignores 'already exists' errors.
         Vector index dimensions are sourced from self.vector_dimensions (default 1536).
         """
+        logger.info(
+            "FalkorDB schema init: configured vector_dimensions=%d",
+            self.vector_dimensions,
+        )
         temporal_queries = _TEMPORAL_SCHEMA_STATIC + _temporal_vector_queries(self.vector_dimensions)
         knowledge_queries = _KNOWLEDGE_SCHEMA_STATIC + _knowledge_vector_queries(self.vector_dimensions)
         await self._init_graph_schema(self._temporal, temporal_queries, "temporal")
         await self._init_graph_schema(self._knowledge, knowledge_queries, "knowledge")
+        await self.warn_if_vector_dim_mismatch()
+
+    async def warn_if_vector_dim_mismatch(self) -> None:
+        """
+        Loud warning if stored episode embeddings disagree with configured dims (v0.10 S4).
+
+        Silent empty vector search is a common failure mode when graphs were built
+        under a different embedder (e.g. 4096 vs 1536).
+        """
+        expected = self.vector_dimensions
+        probes = (
+            ("temporal", self.query_temporal),
+            ("knowledge", self.query_knowledge),
+        )
+        for label, query_fn in probes:
+            try:
+                rows = await query_fn(
+                    "MATCH (ep:Episode) "
+                    "WHERE ep.content_embedding IS NOT NULL "
+                    "RETURN size(ep.content_embedding) AS d LIMIT 1",
+                )
+            except Exception as exc:
+                logger.debug("Vector dim probe skipped [%s]: %s", label, exc)
+                continue
+            if not rows:
+                continue
+            stored = rows[0].get("d")
+            try:
+                stored_i = int(stored)
+            except (TypeError, ValueError):
+                continue
+            if stored_i != expected:
+                logger.error(
+                    "VECTOR DIMENSION MISMATCH [%s]: stored episode embeddings are %d-d "
+                    "but driver is configured for %d-d. Vector search will fail or return "
+                    "empty results. Rebuild the graph or set falkordb.vector_dimensions=%d.",
+                    label,
+                    stored_i,
+                    expected,
+                    stored_i,
+                )
 
     async def _init_graph_schema(
         self, graph: falkordb.Graph | None, queries: list[str], label: str

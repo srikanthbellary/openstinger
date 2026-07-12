@@ -30,6 +30,8 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
+from openstinger.temporal.search_utils import sanitize_bm25_query
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -163,6 +165,7 @@ async def memory_query(
     )
     return {
         "query": query,
+        "bm25_query": results.get("bm25_query"),
         "namespace": namespace,
         "after_date": after_date,
         "before_date": before_date,
@@ -220,6 +223,12 @@ async def memory_search(
 
     is_numeric = _looks_numeric(query)
     is_temporal = _looks_temporal(query)
+    bm25_query = sanitize_bm25_query(query)
+    episode_return = (
+        "node.uuid AS uuid, node.content AS content, "
+        "node.valid_at AS valid_at, node.valid_at_human AS valid_at_human, "
+        "node.source_description AS source_description, score"
+    )
 
     # -------------------------------------------------------------------------
     # EPISODES
@@ -228,18 +237,17 @@ async def memory_search(
         ep_seen: set[str] = set()
         ep_rows: list[dict] = []
 
-        # Primary: BM25 on episode content
+        # Primary: sanitized BM25 on episode content (v0.10 S2)
         try:
             primary = await driver.query_temporal(
                 f"""
                 CALL db.idx.fulltext.queryNodes('Episode', $query)
                 YIELD node, score
                 WHERE node.agent_namespace = $ns{time_filter}
-                RETURN node.uuid AS uuid, node.content AS content,
-                       node.valid_at AS valid_at, score
+                RETURN {episode_return}
                 ORDER BY score DESC LIMIT $limit
                 """,
-                {"query": query, "ns": namespace, "limit": limit, **time_params},
+                {"query": bm25_query, "ns": namespace, "limit": limit, **time_params},
             )
             for row in primary:
                 ep_seen.add(row.get("uuid", ""))
@@ -256,11 +264,10 @@ async def memory_search(
                     YIELD node, score
                     WHERE node.agent_namespace = $ns{time_filter}
                           AND node.valid_at_human IS NOT NULL
-                    RETURN node.uuid AS uuid, node.content AS content,
-                           node.valid_at AS valid_at, score
+                    RETURN {episode_return}
                     ORDER BY score DESC LIMIT $limit
                     """,
-                    {"query": query, "ns": namespace, "limit": limit, **time_params},
+                    {"query": bm25_query, "ns": namespace, "limit": limit, **time_params},
                 )
                 for row in date_rows:
                     uid = row.get("uuid", "")
@@ -270,13 +277,15 @@ async def memory_search(
             except Exception as exc:
                 logger.debug("Episode temporal BM25 error: %s", exc)
 
-        # Numeric fallback: CONTAINS scan — catches IPs, prices, wallet addresses
+        # Numeric / empty fallback: CONTAINS scan (v0.10 S3 parity)
         if is_numeric or (not ep_rows):
             try:
-                time_filter_node = time_filter.replace("node.", "ep.")
                 time_params_ep = {
                     k: v for k, v in time_params.items()
                 }
+                contains_needle = query if is_numeric else " ".join(
+                    re.findall(r"[A-Za-z0-9]+", query.lower())[:6]
+                ) or query
                 numeric_rows = await driver.query_temporal(
                     f"""
                     MATCH (ep:Episode {{agent_namespace: $ns}})
@@ -284,10 +293,16 @@ async def memory_search(
                     {"AND ep.valid_at >= $after_unix" if after_unix else ""}
                     {"AND ep.valid_at <= $before_unix" if before_unix else ""}
                     RETURN ep.uuid AS uuid, ep.content AS content,
-                           ep.valid_at AS valid_at, 0.5 AS score
+                           ep.valid_at AS valid_at, ep.valid_at_human AS valid_at_human,
+                           ep.source_description AS source_description, 0.5 AS score
                     LIMIT $limit
                     """,
-                    {"query": query, "ns": namespace, "limit": limit, **time_params_ep},
+                    {
+                        "query": contains_needle,
+                        "ns": namespace,
+                        "limit": limit,
+                        **time_params_ep,
+                    },
                 )
                 for row in numeric_rows:
                     uid = row.get("uuid", "")
@@ -307,7 +322,8 @@ async def memory_search(
                     YIELD node, score
                     WHERE node.agent_namespace = $ns{time_filter}
                     RETURN node.uuid AS uuid, node.content AS content,
-                           node.valid_at AS valid_at,
+                           node.valid_at AS valid_at, node.valid_at_human AS valid_at_human,
+                           node.source_description AS source_description,
                            (1.0 - score) AS score
                     """,
                     {"embedding": query_embedding, "ns": namespace, "limit": limit, **time_params},
@@ -318,7 +334,11 @@ async def memory_search(
                         ep_seen.add(uid)
                         ep_rows.append({**row, "search_method": "vector_fallback"})
             except Exception as exc:
-                logger.debug("Episode vector fallback error: %s", exc)
+                logger.warning(
+                    "Episode vector fallback error (dims=%s): %s",
+                    getattr(driver, "vector_dimensions", "?"),
+                    exc,
+                )
 
         results["episodes"] = ep_rows
 
@@ -329,7 +349,7 @@ async def memory_search(
         ent_seen: set[str] = set()
         ent_rows: list[dict] = []
 
-        # Primary: BM25 on entity name
+        # Primary: sanitized BM25 on entity name
         try:
             primary = await driver.query_temporal(
                 """
@@ -340,7 +360,7 @@ async def memory_search(
                        node.entity_type AS entity_type, score
                 ORDER BY score DESC LIMIT $limit
                 """,
-                {"query": query, "ns": namespace, "limit": limit},
+                {"query": bm25_query, "ns": namespace, "limit": limit},
             )
             for row in primary:
                 ent_seen.add(row.get("uuid", ""))
