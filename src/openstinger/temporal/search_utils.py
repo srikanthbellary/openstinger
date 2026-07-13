@@ -106,45 +106,17 @@ _LOC_UPDATE_RE = re.compile(
     r"new\s+(?:place|home|apartment|city))\b",
     re.I,
 )
-_KIT_EXPAND = (
-    "model kit", "scale model", "plastic model", "revell", "tamiya",
-    "spitfire", "eagle",  # avoid slash tokens like 1/72 (BM25 syntax errors)
+# Kit/pub/errand expand lists live in search/experimental_lexicons.py (default off)
+# Domain / SoP helpers still used by digests and optional boosts; sourced from quarantine module.
+from openstinger.search.experimental_lexicons import (
+    DOMAIN_LEXICONS as _DOMAIN_LEXICONS,
+    SOP_NOISE_RE as _SOP_NOISE_RE,
 )
-_PUB_EXPAND = (
-    "publication", "conference", "journal", "workshop", "paper",
-    "proceedings", "symposium",
-)
-_ERRAND_EXPAND = (
-    "dry cleaning", "dry cleaners", "pick up", "return", "exchange",
-    "clothing", "boots", "blazer",
-)
-# Generic expertise domains (product-wide; not tied to any benchmark ID)
-_DOMAIN_LEXICONS: dict[str, tuple[str, ...]] = {
-    "healthcare_imaging": (
-        "medical image", "medical imaging", "radiology", "pathology",
-        "healthcare", "clinical", "miccai", "brats", "segmentation",
-        "mri", "ct scan", "x-ray", "diagnostic imaging",
-    ),
-    "robotics": (
-        "robotics", "autonomous", "slam", "manipulation", "humanoid",
-    ),
-    "climate_env": (
-        "climate", "sustainability", "environmental", "carbon", "ecology",
-    ),
-    "nlp_llm": (
-        "natural language", "language model", "nlp", "transformer", "llm",
-    ),
-}
+
 _EXPERTISE_MARKER_RE = re.compile(
     r"\b(?:working in (?:the )?field|my research|skip (?:the )?basics|"
     r"i(?:'?ve| have) been (?:working|researching|studying)|"
     r"specialize(?:d|s)? in|deep learning for|research interest)\b",
-    re.I,
-)
-_SOP_NOISE_RE = re.compile(
-    r"\b(?:statement of purpose|\bsop\b|admissions(?:\s+committee)?|"
-    r"graduate program|masters? application|phd application|"
-    r"why (?:this|your) (?:program|university|school))\b",
     re.I,
 )
 _VENUE_NAME_RE = re.compile(
@@ -153,12 +125,17 @@ _VENUE_NAME_RE = re.compile(
 )
 
 
-def extract_subqueries(query: str, *, max_extra: int = 6) -> list[str]:
+def extract_subqueries(
+    query: str,
+    *,
+    max_extra: int = 6,
+    experimental_lexicons: bool = False,
+) -> list[str]:
     """
     C4: original question plus concrete multi-word / noun sub-queries.
 
     Agents get broader coverage for multi-event and multi-item questions without
-    a separate LLM rewrite step.
+    a separate LLM rewrite step. Dataset-flavored expand lists are opt-in.
     """
     q = (query or "").strip()
     out: list[str] = []
@@ -194,21 +171,9 @@ def extract_subqueries(query: str, *, max_extra: int = 6) -> list[str]:
         if len(out) >= max_extra + 1:
             break
 
-    ql = q.lower()
-    # Hobby / scale-model coverage when user asks about kits
-    if "kit" in ql or "model" in ql:
-        for s in _KIT_EXPAND:
-            _add(s)
-    # Publication / conference recommend coverage
-    if any(w in ql for w in ("publication", "conference", "paper", "journal", "interesting")):
-        for s in _PUB_EXPAND:
-            _add(s)
-    # Multi-session errand / clothing count coverage
-    if is_count_query(q) or any(
-        w in ql for w in ("pick up", "return", "clothing", "store", "exchange")
-    ):
-        for s in _ERRAND_EXPAND:
-            _add(s)
+    if experimental_lexicons:
+        from openstinger.search.experimental_lexicons import append_experimental_subqueries
+        append_experimental_subqueries(q, _add)
 
     return out[: max_extra + 1 + 8]
 

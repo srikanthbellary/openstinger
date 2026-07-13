@@ -29,12 +29,19 @@ llm:
   embedding_model: text-embedding-3-small
   embedding_provider: openai
 
+# MCP transport
+mcp:
+  transport: stdio                    # stdio | tcp
+  tcp_port: 8765
+
 # Ingestion settings (Tier 1)
+# extract_statements: distill atomic Statement nodes (extra LLM call per episode)
 ingestion:
-  sessions_dir: null                  # path to OpenClaw sessions/ dir — required for auto-ingestion
-  workspace_dir: null                 # path to OpenClaw workspace/ dir — read-only reference
+  sessions_dir: null
+  workspace_dir: null
   poll_interval_seconds: 5
-  chunk_size: 10                      # episodes per ingestion batch
+  chunk_size: 10
+  extract_statements: true
 
 # Deduplication thresholds (Tier 1)
 deduplication:
@@ -65,12 +72,18 @@ gradient:
   consecutive_flag_limit: 5
   min_outputs_before_active: 100
 
-# MCP transport
-mcp:
-  transport: stdio                    # stdio | tcp
-  tcp_port: 8765
-
 # Logging
 logging:
   level: INFO                         # DEBUG | INFO | WARNING | ERROR
   file: null                          # null = stdout only; or path to log file
+
+# Retrieval pipeline (v0.10 wave 2)
+retrieval:
+  rrf_k: 60
+  candidate_multiplier: 3
+  candidate_cap: 60
+  experimental_lexicons: false        # keep false for publishable fair scores
+  abstain_threshold: 0.15
+  reranker: none                      # none | llm | cross_encoder
+  rerank_top_n: 30
+  keep_digests: true

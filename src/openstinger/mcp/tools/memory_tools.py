@@ -143,6 +143,7 @@ async def memory_query(
     agent_namespace: str | None = None,
     after_date: str | None = None,
     before_date: str | None = None,
+    max_tokens: int | None = None,
 ) -> dict:
     """
     Hybrid search (BM25 + vector) across episodes, entities, and facts.
@@ -162,6 +163,7 @@ async def memory_query(
         include_expired=include_expired,
         after_unix=after_unix,
         before_unix=before_unix,
+        max_tokens=max_tokens,
     )
     return {
         "query": query,
@@ -169,6 +171,11 @@ async def memory_query(
         "subqueries": results.get("subqueries"),
         "conflicts": results.get("conflicts", []),
         "digests": results.get("digests", {}),
+        "retrieval_confidence": results.get("retrieval_confidence", 0.0),
+        "abstain_suggested": results.get("abstain_suggested", False),
+        "tokens_used": results.get("tokens_used", 0),
+        "items_dropped": results.get("items_dropped", 0),
+        "pipeline": results.get("pipeline", {}),
         "namespace": namespace,
         "after_date": after_date,
         "before_date": before_date,
@@ -191,277 +198,42 @@ async def memory_search(
     agent_namespace: str | None = None,
     after_date: str | None = None,
     before_date: str | None = None,
+    max_tokens: int | None = None,
 ) -> dict:
     """
-    Smart search with three layers of fallback:
-
-    1. BM25 fulltext (primary — fast, token-based)
-    2. Zero-result fallback:
-       - Entities: vector similarity search (handles typos like "Qinn" → "Quinn")
-       - Episodes: toLower CONTAINS scan (handles partial matches)
-    3. Numeric/IP detection: always appends toLower CONTAINS results for queries
-       containing IP addresses, prices, wallet addresses, long numbers
-    4. Temporal detection: if query mentions a month/year, also searches
-       valid_at_human field so "February 2026" finds episodes from that period
+    Unified search via RetrievalPipeline (same core path as memory_query).
 
     search_type: 'episodes' | 'entities' | 'facts' | 'all'
-    after_date / before_date: optional ISO date strings (YYYY-MM-DD or YYYY-MM)
     """
     namespace = agent_namespace or engine.agent_namespace
-    driver = engine.driver
-    results: dict[str, list] = {}
-
     after_unix = _parse_date_to_unix(after_date) if after_date else None
     before_unix = _parse_date_to_unix(before_date) if before_date else None
-
-    # Build temporal WHERE clause for valid_at filtering
-    time_filter = ""
-    time_params: dict[str, Any] = {}
-    if after_unix is not None:
-        time_filter += " AND node.valid_at >= $after_unix"
-        time_params["after_unix"] = after_unix
-    if before_unix is not None:
-        time_filter += " AND node.valid_at <= $before_unix"
-        time_params["before_unix"] = before_unix
-
-    is_numeric = _looks_numeric(query)
-    is_temporal = _looks_temporal(query)
-    bm25_query = sanitize_bm25_query(query)
-    episode_return = (
-        "node.uuid AS uuid, node.content AS content, "
-        "node.valid_at AS valid_at, node.valid_at_human AS valid_at_human, "
-        "node.source_description AS source_description, score"
+    full = await engine.query_memory(
+        query=query,
+        agent_namespace=namespace,
+        limit=limit,
+        after_unix=after_unix,
+        before_unix=before_unix,
+        max_tokens=max_tokens,
     )
-
-    # -------------------------------------------------------------------------
-    # EPISODES
-    # -------------------------------------------------------------------------
-    if search_type in ("episodes", "all"):
-        ep_seen: set[str] = set()
-        ep_rows: list[dict] = []
-
-        # Primary: sanitized BM25 on episode content (v0.10 S2)
-        try:
-            primary = await driver.query_temporal(
-                f"""
-                CALL db.idx.fulltext.queryNodes('Episode', $query)
-                YIELD node, score
-                WHERE node.agent_namespace = $ns{time_filter}
-                RETURN {episode_return}
-                ORDER BY score DESC LIMIT $limit
-                """,
-                {"query": bm25_query, "ns": namespace, "limit": limit, **time_params},
-            )
-            for row in primary:
-                ep_seen.add(row.get("uuid", ""))
-                ep_rows.append({**row, "search_method": "bm25"})
-        except Exception as exc:
-            logger.debug("Episode BM25 search error: %s", exc)
-
-        # Temporal fallback: if query looks date-like, search valid_at_human
-        if is_temporal:
-            try:
-                date_rows = await driver.query_temporal(
-                    f"""
-                    CALL db.idx.fulltext.queryNodes('Episode', $query)
-                    YIELD node, score
-                    WHERE node.agent_namespace = $ns{time_filter}
-                          AND node.valid_at_human IS NOT NULL
-                    RETURN {episode_return}
-                    ORDER BY score DESC LIMIT $limit
-                    """,
-                    {"query": bm25_query, "ns": namespace, "limit": limit, **time_params},
-                )
-                for row in date_rows:
-                    uid = row.get("uuid", "")
-                    if uid and uid not in ep_seen:
-                        ep_seen.add(uid)
-                        ep_rows.append({**row, "search_method": "temporal_bm25"})
-            except Exception as exc:
-                logger.debug("Episode temporal BM25 error: %s", exc)
-
-        # Numeric / empty fallback: CONTAINS scan (v0.10 S3 parity)
-        if is_numeric or (not ep_rows):
-            try:
-                time_params_ep = {
-                    k: v for k, v in time_params.items()
-                }
-                contains_needle = query if is_numeric else " ".join(
-                    re.findall(r"[A-Za-z0-9]+", query.lower())[:6]
-                ) or query
-                numeric_rows = await driver.query_temporal(
-                    f"""
-                    MATCH (ep:Episode {{agent_namespace: $ns}})
-                    WHERE toLower(ep.content) CONTAINS toLower($query)
-                    {"AND ep.valid_at >= $after_unix" if after_unix else ""}
-                    {"AND ep.valid_at <= $before_unix" if before_unix else ""}
-                    RETURN ep.uuid AS uuid, ep.content AS content,
-                           ep.valid_at AS valid_at, ep.valid_at_human AS valid_at_human,
-                           ep.source_description AS source_description, 0.5 AS score
-                    LIMIT $limit
-                    """,
-                    {
-                        "query": contains_needle,
-                        "ns": namespace,
-                        "limit": limit,
-                        **time_params_ep,
-                    },
-                )
-                for row in numeric_rows:
-                    uid = row.get("uuid", "")
-                    if uid and uid not in ep_seen:
-                        ep_seen.add(uid)
-                        ep_rows.append({**row, "search_method": "contains_fallback"})
-            except Exception as exc:
-                logger.debug("Episode CONTAINS fallback error: %s", exc)
-
-        # Zero-result fallback: semantic vector search on episode content_embedding
-        if not ep_rows:
-            try:
-                query_embedding = await engine.embedder.embed(query)
-                vec_rows = await driver.query_temporal(
-                    f"""
-                    CALL db.idx.vector.queryNodes('Episode', 'content_embedding', $limit, vecf32($embedding))
-                    YIELD node, score
-                    WHERE node.agent_namespace = $ns{time_filter}
-                    RETURN node.uuid AS uuid, node.content AS content,
-                           node.valid_at AS valid_at, node.valid_at_human AS valid_at_human,
-                           node.source_description AS source_description,
-                           (1.0 - score) AS score
-                    """,
-                    {"embedding": query_embedding, "ns": namespace, "limit": limit, **time_params},
-                )
-                for row in vec_rows:
-                    uid = row.get("uuid", "")
-                    if uid and uid not in ep_seen:
-                        ep_seen.add(uid)
-                        ep_rows.append({**row, "search_method": "vector_fallback"})
-            except Exception as exc:
-                logger.warning(
-                    "Episode vector fallback error (dims=%s): %s",
-                    getattr(driver, "vector_dimensions", "?"),
-                    exc,
-                )
-
-        results["episodes"] = ep_rows
-
-    # -------------------------------------------------------------------------
-    # ENTITIES
-    # -------------------------------------------------------------------------
-    if search_type in ("entities", "all"):
-        ent_seen: set[str] = set()
-        ent_rows: list[dict] = []
-
-        # Primary: sanitized BM25 on entity name
-        try:
-            primary = await driver.query_temporal(
-                """
-                CALL db.idx.fulltext.queryNodes('Entity', $query)
-                YIELD node, score
-                WHERE node.agent_namespace = $ns
-                RETURN node.uuid AS uuid, node.name AS name,
-                       node.entity_type AS entity_type, score
-                ORDER BY score DESC LIMIT $limit
-                """,
-                {"query": bm25_query, "ns": namespace, "limit": limit},
-            )
-            for row in primary:
-                ent_seen.add(row.get("uuid", ""))
-                ent_rows.append({**row, "search_method": "bm25"})
-        except Exception as exc:
-            logger.debug("Entity BM25 error: %s", exc)
-
-        # Zero-result / Fuzzy fallback: vector search on entity name_embedding
-        # This catches typos like "Qinn" → "Quinn" and abbreviations
-        if not ent_rows or is_numeric:
-            try:
-                query_embedding = await engine.embedder.embed(query)
-                vec_rows = await driver.query_temporal(
-                    """
-                    CALL db.idx.vector.queryNodes('Entity', 'name_embedding', $limit, vecf32($embedding))
-                    YIELD node, score
-                    WHERE node.agent_namespace = $ns
-                    RETURN node.uuid AS uuid, node.name AS name,
-                           node.entity_type AS entity_type,
-                           (1.0 - score) AS score
-                    """,
-                    {"embedding": query_embedding, "ns": namespace, "limit": limit},
-                )
-                for row in vec_rows:
-                    uid = row.get("uuid", "")
-                    if uid and uid not in ent_seen:
-                        ent_seen.add(uid)
-                        ent_rows.append({**row, "search_method": "vector_fallback"})
-            except Exception as exc:
-                logger.debug("Entity vector fallback error: %s", exc)
-
-        # CONTAINS fallback: catches partial name matches and substrings
-        if not ent_rows:
-            try:
-                contains_rows = await driver.query_temporal(
-                    """
-                    MATCH (e:Entity {agent_namespace: $ns})
-                    WHERE toLower(e.name) CONTAINS toLower($query)
-                    RETURN e.uuid AS uuid, e.name AS name,
-                           e.entity_type AS entity_type, 0.4 AS score
-                    LIMIT $limit
-                    """,
-                    {"query": query, "ns": namespace, "limit": limit},
-                )
-                for row in contains_rows:
-                    uid = row.get("uuid", "")
-                    if uid and uid not in ent_seen:
-                        ent_seen.add(uid)
-                        ent_rows.append({**row, "search_method": "contains_fallback"})
-            except Exception as exc:
-                logger.debug("Entity CONTAINS fallback error: %s", exc)
-
-        results["entities"] = ent_rows
-
-    # -------------------------------------------------------------------------
-    # FACTS
-    # -------------------------------------------------------------------------
-    if search_type in ("facts", "all"):
-        # Primary + only: case-insensitive toLower CONTAINS
-        # (FalkorDB does not support relationship fulltext indexes)
-        time_filter_rel = ""
-        if after_unix is not None:
-            time_filter_rel += " AND r.valid_from >= $after_unix"
-        if before_unix is not None:
-            time_filter_rel += " AND r.valid_from <= $before_unix"
-
-        try:
-            rows = await driver.query_temporal(
-                f"""
-                MATCH ()-[r:RELATES_TO {{agent_namespace: $ns}}]-()
-                WHERE toLower(r.fact) CONTAINS toLower($query)
-                      AND r.expired_at IS NULL{time_filter_rel}
-                RETURN r.uuid AS uuid, r.fact AS fact,
-                       r.relation_type AS relation_type,
-                       r.valid_from AS valid_from
-                LIMIT $limit
-                """,
-                {"query": query, "ns": namespace, "limit": limit, **time_params},
-            )
-            results["facts"] = rows
-        except Exception as exc:
-            logger.debug("Fact search error: %s", exc)
-            results["facts"] = []
-
-    return {
+    out = {
         "query": query,
+        "bm25_query": full.get("bm25_query"),
+        "retrieval_confidence": full.get("retrieval_confidence", 0.0),
+        "abstain_suggested": full.get("abstain_suggested", False),
+        "pipeline": full.get("pipeline", {}),
         "namespace": namespace,
         "after_date": after_date,
         "before_date": before_date,
-        "is_numeric_query": is_numeric,
-        "is_temporal_query": is_temporal,
-        **results,
+        "episodes": full.get("episodes", []) if search_type in ("episodes", "all") else [],
+        "entities": full.get("entities", []) if search_type in ("entities", "all") else [],
+        "facts": full.get("facts", []) if search_type in ("facts", "all") else [],
+        "ranked": full.get("ranked", []),
+        "conflicts": full.get("conflicts", []),
+        "tokens_used": full.get("tokens_used", 0),
     }
+    return out
 
-
-# ---------------------------------------------------------------------------
-# Tool 4: memory_get_entity
-# ---------------------------------------------------------------------------
 
 async def memory_get_entity(engine: Any, uuid: str) -> dict:
     """Fetch entity node by UUID including current and expired edges."""
@@ -656,3 +428,90 @@ async def memory_update(
     Existing entity relationships are preserved.
     """
     return await engine.update_episode(episode_uuid, new_content)
+
+
+# ---------------------------------------------------------------------------
+# Tool 13: memory_reflect (v0.10 wave 2)
+# ---------------------------------------------------------------------------
+
+async def memory_reflect(
+    engine: Any,
+    query: str,
+    max_tokens: int = 2000,
+    agent_namespace: str | None = None,
+    after_date: str | None = None,
+    before_date: str | None = None,
+) -> dict:
+    """
+    Retrieve then reason: answer from memory with optional abstention.
+
+    Fair retrieval scores should still use memory_query; this is the product QA path.
+    """
+    from openstinger.temporal.prompts.reflect import REFLECT_SYSTEM, build_reflect_user
+
+    namespace = agent_namespace or engine.agent_namespace
+    after_unix = _parse_date_to_unix(after_date) if after_date else None
+    before_unix = _parse_date_to_unix(before_date) if before_date else None
+
+    retrieved = await engine.pipeline.search(
+        query,
+        agent_namespace=namespace,
+        limit=10,
+        after_unix=after_unix,
+        before_unix=before_unix,
+        max_tokens=max_tokens,
+        candidate_multiplier=4,
+    )
+    if retrieved.get("abstain_suggested"):
+        return {
+            "answer": "I do not have enough relevant memory to answer.",
+            "confidence": retrieved.get("retrieval_confidence", 0.0),
+            "abstained": True,
+            "supporting_uuids": [],
+            "conflicts_considered": retrieved.get("conflicts", []),
+            "tokens_retrieved": retrieved.get("tokens_used", 0),
+            "retrieval_confidence": retrieved.get("retrieval_confidence", 0.0),
+        }
+
+    blocks = []
+    uuids = []
+    for i, ep in enumerate(retrieved.get("episodes") or [], 1):
+        sid = ep.get("source_description") or ep.get("uuid") or ""
+        when = ep.get("valid_at_human") or ""
+        label = ep.get("recency_label") or ""
+        header = f"[{i}] {sid}"
+        if when:
+            header += f" | {when}"
+        if label:
+            header += f" | {str(label).upper()}"
+        blocks.append(f"{header}\n{ep.get('content') or ''}")
+        if ep.get("uuid"):
+            uuids.append(ep["uuid"])
+
+    user = build_reflect_user(query, blocks, retrieved.get("conflicts"))
+    answer = ""
+    try:
+        llm = engine.llm
+        if hasattr(llm, "complete"):
+            answer = await llm.complete(system=REFLECT_SYSTEM, user=user, use_fast_model=True)
+        elif hasattr(llm, "generate"):
+            answer = await llm.generate(f"{REFLECT_SYSTEM}\n\n{user}")
+        else:
+            answer = "INSUFFICIENT_MEMORY"
+    except Exception as exc:
+        logger.warning("memory_reflect LLM failed: %s", exc)
+        answer = "INSUFFICIENT_MEMORY"
+
+    text = (answer or "").strip()
+    abstained = "INSUFFICIENT_MEMORY" in text.upper() or not text
+    if abstained:
+        text = "I do not have enough relevant memory to answer."
+    return {
+        "answer": text,
+        "confidence": retrieved.get("retrieval_confidence", 0.0),
+        "abstained": abstained,
+        "supporting_uuids": uuids,
+        "conflicts_considered": retrieved.get("conflicts", []),
+        "tokens_retrieved": retrieved.get("tokens_used", 0),
+        "retrieval_confidence": retrieved.get("retrieval_confidence", 0.0),
+    }

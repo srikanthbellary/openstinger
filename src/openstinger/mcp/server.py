@@ -1,7 +1,7 @@
 """
 Tier 1 MCP server — OpenStinger memory harness.
 
-Exposes 12 MCP tools (v0.9: +memory_wake_up). Supports stdio (default) and TCP transport.
+Exposes 13 MCP tools (v0.10: +memory_reflect). Supports stdio (default) and TCP transport.
 
 Startup sequence:
   1. Load config (config.yaml + .env)
@@ -38,6 +38,7 @@ from openstinger.mcp.tools.memory_tools import (
     memory_list_agents,
     memory_namespace_status,
     memory_query,
+    memory_reflect,
     memory_search,
     memory_update,
 )
@@ -239,6 +240,30 @@ TOOL_SCHEMAS: list[types.Tool] = [
             "required": [],
         },
     ),
+    types.Tool(
+        name="memory_reflect",
+        description=(
+            "Retrieve memories then answer the question with reasoning. "
+            "Prefer for multi-hop, counting, temporal, and preference questions. "
+            "May abstain when retrieval confidence is low. "
+            "For raw search without answering, use memory_query."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Natural language question"},
+                "max_tokens": {
+                    "type": "integer",
+                    "description": "Token budget for retrieved context (default 2000)",
+                    "default": 2000,
+                },
+                "agent_namespace": {"type": "string"},
+                "after_date": {"type": "string"},
+                "before_date": {"type": "string"},
+            },
+            "required": ["query"],
+        },
+    ),
 ]
 
 
@@ -312,6 +337,8 @@ class OpenStingerServer:
                     max_episodes=args.get("max_episodes", 5),
                     max_notes=args.get("max_notes", 3),
                 )
+            case "memory_reflect":
+                return await with_timeout(_timeout)(memory_reflect)(self.engine, **args)
             case _:
                 return {"error": f"Unknown tool: {name}"}
 
@@ -405,6 +432,8 @@ class OpenStingerServer:
             embedder=self.embedder,
             entity_registry=self.entity_registry,
             agent_namespace=cfg.agent_namespace,
+            retrieval_config=cfg.retrieval,
+            extract_statements=cfg.ingestion.extract_statements,
         )
 
         deduplicator = DeduplicationEngine(

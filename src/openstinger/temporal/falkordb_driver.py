@@ -49,6 +49,10 @@ _TEMPORAL_SCHEMA_STATIC = [
     "CREATE FULLTEXT INDEX FOR (ep:Episode) ON (ep.content)",
     # valid_at_human enables date-based BM25 searches ("February 2026", "March 15")
     "CREATE FULLTEXT INDEX FOR (ep:Episode) ON (ep.valid_at_human)",
+    # Statement nodes (v0.10 wave 2 atomic distillation)
+    "CREATE INDEX FOR (s:Statement) ON (s.uuid)",
+    "CREATE INDEX FOR (s:Statement) ON (s.agent_namespace)",
+    "CREATE FULLTEXT INDEX FOR (s:Statement) ON (s.text)",
 ]
 
 _KNOWLEDGE_SCHEMA_STATIC = [
@@ -65,6 +69,7 @@ def _temporal_vector_queries(dim: int) -> list[str]:
         f"CREATE VECTOR INDEX FOR (e:Entity) ON (e.name_embedding) OPTIONS {{dimension: {dim}, similarityFunction: 'cosine'}}",
         f"CREATE VECTOR INDEX FOR (ep:Episode) ON (ep.content_embedding) OPTIONS {{dimension: {dim}, similarityFunction: 'cosine'}}",
         f"CREATE VECTOR INDEX FOR ()-[r:RELATES_TO]-() ON (r.fact_embedding) OPTIONS {{dimension: {dim}, similarityFunction: 'cosine'}}",
+        f"CREATE VECTOR INDEX FOR (s:Statement) ON (s.text_embedding) OPTIONS {{dimension: {dim}, similarityFunction: 'cosine'}}",
     ]
 
 

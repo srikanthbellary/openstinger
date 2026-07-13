@@ -128,6 +128,8 @@ class IngestionConfig(BaseModel):
     concurrency: int = 5             # max parallel episodes per batch (1=sequential, 10=max)
     write_policy_enabled: bool = True
     write_policy_dedup_threshold: float = 0.95
+    extract_statements: bool = True  # v0.10 wave 2: atomic statement distillation
+    typed_min_chars: int = 80
 
 
 class ResilienceConfig(BaseModel):
@@ -140,6 +142,20 @@ class ResilienceConfig(BaseModel):
     retry_base_delay:                  float = 1.0
     retry_max_delay:                   float = 30.0
     retry_jitter:                      bool  = True
+
+
+class RetrievalConfig(BaseModel):
+    """v0.10 wave 2 — unified retrieval pipeline (RRF, rerank, reflect)."""
+    rrf_k: int = 60
+    candidate_multiplier: int = 3
+    candidate_cap: int = 60
+    channel_weights: dict[str, float] = Field(default_factory=dict)
+    experimental_lexicons: bool = False
+    abstain_threshold: float = 0.15
+    reranker: Literal["none", "llm", "cross_encoder"] = "none"
+    rerank_top_n: int = 30
+    rerank_timeout_ms: int = 3000
+    keep_digests: bool = True  # empty after reflect proves out; keep for compat
 
 
 class DeduplicationConfig(BaseModel):
@@ -213,6 +229,7 @@ class HarnessConfig(BaseModel):
     mcp: MCPConfig = Field(default_factory=MCPConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     resilience: ResilienceConfig = Field(default_factory=ResilienceConfig)
+    retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
 
     # Runtime-resolved paths (set post-init, not from YAML)
     _root_dir: Optional[Path] = None

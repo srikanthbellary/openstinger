@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid as uuid_lib
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -32,33 +33,17 @@ from openstinger.temporal.openai_embedder import OpenAIEmbedder
 from openstinger.temporal.prompts.extraction import (
     EXTRACT_ENTITIES_SYSTEM,
     EXTRACT_EDGES_SYSTEM,
+    EXTRACT_STATEMENTS_SYSTEM,
     build_extract_entities_user,
     build_extract_edges_user,
+    build_extract_statements_user,
 )
 from openstinger.temporal.search_utils import (
-    _DOMAIN_LEXICONS,
-    _SOP_NOISE_RE,
-    apply_errand_boost,
-    apply_preference_boost,
-    apply_recency_packaging,
-    diversify_by_source,
-    effective_search_limit,
-    extract_query_focus_terms,
-    extract_search_terms,
-    extract_subqueries,
-    force_include_expertise_episodes,
-    force_include_focus_episodes,
-    is_recommend_query,
-    order_hits_for_answer,
-    package_episode_row,
-    prioritize_query_entity_recency,
     sanitize_bm25_query,
-    score_domain_depth,
-    build_expertise_digest,
-    build_inventory_digest,
-    build_preference_digest,
-    is_count_query,
 )
+from openstinger.config import RetrievalConfig
+from openstinger.search.pipeline import RetrievalPipeline
+
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +109,31 @@ EXTRACT_EDGES_TOOL = {
     },
 }
 
+EXTRACT_STATEMENTS_TOOL = {
+    "name": "extract_statements",
+    "description": "Distill atomic self-contained memory statements from an episode",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "statements": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "text": {"type": "string"},
+                        "valid_from_iso": {
+                            "type": "string",
+                            "description": "ISO date or null",
+                        },
+                    },
+                    "required": ["text"],
+                },
+            }
+        },
+        "required": ["statements"],
+    },
+}
+
 
 # ---------------------------------------------------------------------------
 # TemporalEngine
@@ -149,12 +159,17 @@ class TemporalEngine:
         embedder: OpenAIEmbedder,
         entity_registry: EntityRegistry,
         agent_namespace: str = "default",
+        retrieval_config: RetrievalConfig | None = None,
+        extract_statements: bool = True,
     ) -> None:
         self.driver = driver
         self.llm = llm
         self.embedder = embedder
         self.entity_registry = entity_registry
         self.agent_namespace = agent_namespace
+        self.retrieval_config = retrieval_config or RetrievalConfig()
+        self.extract_statements = extract_statements
+        self._pipeline: RetrievalPipeline | None = None
 
         # Lazy import to avoid circular
         self._deduplicator: Optional[Any] = None
@@ -162,6 +177,12 @@ class TemporalEngine:
 
         # v0.9 — write policy (lazy import; wired after server config is available)
         self._write_policy: Optional[Any] = None
+
+    @property
+    def pipeline(self) -> RetrievalPipeline:
+        if self._pipeline is None:
+            self._pipeline = RetrievalPipeline(self, self.retrieval_config)
+        return self._pipeline
 
     def set_deduplicator(self, deduplicator: Any) -> None:
         self._deduplicator = deduplicator
@@ -318,6 +339,15 @@ class TemporalEngine:
 
         episode.entity_count = len(deduped_entities)
         episode.edge_count = len(raw_edges)
+
+        # Step 9: Distill atomic statements (v0.10 wave 2)
+        if self.extract_statements and len((content or "").strip()) >= 80:
+            try:
+                n_stmt = await self._distill_and_persist_statements(episode)
+                logger.debug("Statements distilled: %d", n_stmt)
+            except Exception as exc:
+                logger.warning("Statement distillation failed: %s", exc)
+
         logger.info("Episode ingested: %s (%d entities, %d edges)",
                     episode.uuid[:8], episode.entity_count, episode.edge_count)
         return episode
@@ -353,9 +383,14 @@ class TemporalEngine:
             return []
         entity_names = [e.name for e in entities]
         try:
+            ref = None
+            try:
+                ref = datetime.fromtimestamp(episode.valid_at, tz=timezone.utc).date().isoformat()
+            except Exception:
+                ref = None
             result = await self.llm.complete_with_tools(
                 system=EXTRACT_EDGES_SYSTEM,
-                user=build_extract_edges_user(episode.content, entity_names),
+                user=build_extract_edges_user(episode.content, entity_names, reference_time=ref),
                 tools=[EXTRACT_EDGES_TOOL],
             )
             return result.get("edges", [])
@@ -421,6 +456,90 @@ class TemporalEngine:
             },
         )
 
+    async def _distill_and_persist_statements(self, episode: EpisodeNode) -> int:
+        """Extract atomic Statement nodes and link via DISTILLED_TO."""
+        try:
+            ref = datetime.fromtimestamp(episode.valid_at, tz=timezone.utc).date().isoformat()
+        except Exception:
+            ref = None
+        try:
+            result = await self.llm.complete_with_tools(
+                system=EXTRACT_STATEMENTS_SYSTEM,
+                user=build_extract_statements_user(episode.content, reference_time=ref),
+                tools=[EXTRACT_STATEMENTS_TOOL],
+            )
+        except Exception as exc:
+            logger.warning("Statement LLM extract failed: %s", exc)
+            return 0
+        statements = result.get("statements") or []
+        if not statements:
+            return 0
+        texts = [s.get("text", "").strip() for s in statements if s.get("text")]
+        texts = [t for t in texts if t][:12]
+        if not texts:
+            return 0
+        try:
+            embeddings = await self.embedder.embed_batch(texts)
+        except Exception as exc:
+            logger.warning("Statement embed failed: %s", exc)
+            embeddings = [None] * len(texts)
+        n = 0
+        for text, emb in zip(texts, embeddings):
+            sid = str(uuid_lib.uuid4())
+            try:
+                await self.driver.query_temporal(
+                    """
+                    CREATE (s:Statement {
+                        uuid: $uuid,
+                        text: $text,
+                        valid_at: $valid_at,
+                        agent_namespace: $namespace
+                    })
+                    SET s.text_embedding = vecf32($embedding)
+                    WITH s
+                    MATCH (ep:Episode {uuid: $ep_uuid})
+                    CREATE (ep)-[:DISTILLED_TO {uuid: $link_uuid}]->(s)
+                    """,
+                    {
+                        "uuid": sid,
+                        "text": text,
+                        "valid_at": episode.valid_at,
+                        "namespace": episode.agent_namespace,
+                        "embedding": emb or [],
+                        "ep_uuid": episode.uuid,
+                        "link_uuid": str(uuid_lib.uuid4()),
+                    },
+                )
+                n += 1
+            except Exception as exc:
+                # Fallback without vector if index missing
+                try:
+                    await self.driver.query_temporal(
+                        """
+                        CREATE (s:Statement {
+                            uuid: $uuid,
+                            text: $text,
+                            valid_at: $valid_at,
+                            agent_namespace: $namespace
+                        })
+                        WITH s
+                        MATCH (ep:Episode {uuid: $ep_uuid})
+                        CREATE (ep)-[:DISTILLED_TO {uuid: $link_uuid}]->(s)
+                        """,
+                        {
+                            "uuid": sid,
+                            "text": text,
+                            "valid_at": episode.valid_at,
+                            "namespace": episode.agent_namespace,
+                            "ep_uuid": episode.uuid,
+                            "link_uuid": str(uuid_lib.uuid4()),
+                        },
+                    )
+                    n += 1
+                except Exception as exc2:
+                    logger.debug("Statement persist failed: %s / %s", exc, exc2)
+        return n
+
     # ------------------------------------------------------------------
     # Search
     # ------------------------------------------------------------------
@@ -433,390 +552,27 @@ class TemporalEngine:
         include_expired: bool = False,
         after_unix: int | None = None,
         before_unix: int | None = None,
+        max_tokens: int | None = None,
     ) -> dict[str, Any]:
         """
-        Hybrid search: BM25 keyword + vector similarity on episodes, entities, and facts.
-
-        Episode search: sanitized BM25 + vector + keyword CONTAINS merge (v0.10 S1–S3),
-        plus multi-noun subqueries (C4), preference boost (C3), session diversity (C2),
-        and recency packaging (C1).
+        Hybrid search via RetrievalPipeline (RRF fusion, graph expand, optional rerank).
 
         Episode rows include source_description, valid_at_human, optional recency_label.
-
-        after_unix / before_unix: optional unix timestamps to filter episodes by valid_at.
-
-        Scores are normalised — BM25 min-max to [0,1]; vector converted from
-        cosine distance to similarity (1 - distance) so higher = more relevant.
-        Returns dict with keys: episodes, entities, facts, ranked, conflicts, bm25_query.
+        Returns episodes, entities, facts, ranked, conflicts, digests, retrieval_confidence.
         """
-        namespace = agent_namespace or self.agent_namespace
-        search_limit = effective_search_limit(query, limit)
-        fetch_limit = max(search_limit * 2, 20)
-        bm25_query = sanitize_bm25_query(query)
-        terms = extract_search_terms(query)
-        subqueries = extract_subqueries(query)
-        query_embedding = await self.embedder.embed(query)
-
-        # Build temporal filter clause for episode queries
-        time_filter = ""
-        time_params: dict[str, Any] = {}
-        if after_unix is not None:
-            time_filter += " AND node.valid_at >= $after_unix"
-            time_params["after_unix"] = after_unix
-        if before_unix is not None:
-            time_filter += " AND node.valid_at <= $before_unix"
-            time_params["before_unix"] = before_unix
-
-        episode_return = (
-            "node.uuid AS uuid, node.content AS content, "
-            "node.valid_at AS valid_at, node.valid_at_human AS valid_at_human, "
-            "node.source_description AS source_description, score"
+        result = await self.pipeline.search(
+            query,
+            agent_namespace=agent_namespace,
+            limit=limit,
+            include_expired=include_expired,
+            after_unix=after_unix,
+            before_unix=before_unix,
+            max_tokens=max_tokens,
         )
-
-        async def _bm25(q: str, lim: int) -> list[dict]:
-            try:
-                return await self.driver.query_temporal(
-                    f"""
-                    CALL db.idx.fulltext.queryNodes('Episode', $query)
-                    YIELD node, score
-                    WHERE node.agent_namespace = $namespace{time_filter}
-                    RETURN {episode_return}
-                    ORDER BY score DESC LIMIT $limit
-                    """,
-                    {"query": sanitize_bm25_query(q), "namespace": namespace, "limit": lim, **time_params},
-                )
-            except Exception as exc:
-                logger.warning("Episode BM25 search failed (query=%r): %s", q, exc)
-                return []
-
-        # Primary BM25 + C4 subquery BM25 union
-        episode_bm25_rows: list[dict] = []
-        seen_bm25: set[str] = set()
-        for sq in subqueries:
-            for r in await _bm25(sq, fetch_limit):
-                uid = r.get("uuid")
-                if uid and uid not in seen_bm25:
-                    seen_bm25.add(uid)
-                    episode_bm25_rows.append(r)
-
-        # Vector search on episode content_embedding
-        episode_vec_rows: list[dict] = []
-        try:
-            episode_vec_rows = await self.driver.query_temporal(
-                f"""
-                CALL db.idx.vector.queryNodes('Episode', 'content_embedding', $limit, vecf32($embedding))
-                YIELD node, score
-                WHERE node.agent_namespace = $namespace{time_filter}
-                RETURN {episode_return}
-                """,
-                {
-                    "embedding": query_embedding,
-                    "namespace": namespace,
-                    "limit": fetch_limit,
-                    **time_params,
-                },
-            )
-        except Exception as exc:
-            logger.warning(
-                "Episode vector search unavailable (configured dims=%s): %s",
-                getattr(self.driver, "vector_dimensions", "?"),
-                exc,
-            )
-
-        # Keyword CONTAINS merge (S3) over primary terms + subquery nouns
-        episode_contains_rows: list[dict] = []
-        contain_terms = list(dict.fromkeys(terms + [t for sq in subqueries[1:] for t in extract_search_terms(sq)]))
-        if contain_terms:
-            scores: dict[str, float] = {}
-            payloads: dict[str, dict] = {}
-            ordered_terms = sorted(set(contain_terms), key=lambda w: (-len(w), w))[:12]
-            for kw in ordered_terms:
-                try:
-                    rows = await self.driver.query_temporal(
-                        f"""
-                        MATCH (ep:Episode {{agent_namespace: $namespace}})
-                        WHERE toLower(ep.content) CONTAINS $kw
-                        {"AND ep.valid_at >= $after_unix" if after_unix is not None else ""}
-                        {"AND ep.valid_at <= $before_unix" if before_unix is not None else ""}
-                        RETURN ep.uuid AS uuid, ep.content AS content,
-                               ep.valid_at AS valid_at, ep.valid_at_human AS valid_at_human,
-                               ep.source_description AS source_description
-                        LIMIT $limit
-                        """,
-                        {
-                            "namespace": namespace,
-                            "kw": kw.lower(),
-                            "limit": max(fetch_limit, 30),
-                            **time_params,
-                        },
-                    )
-                    for r in rows:
-                        uid = r.get("uuid")
-                        if not uid:
-                            continue
-                        scores[uid] = scores.get(uid, 0.0) + 1.0 + (len(kw) / 20.0)
-                        payloads[uid] = {
-                            **r,
-                            "score": scores[uid],
-                            "search_type": "contains",
-                        }
-                except Exception as exc:
-                    logger.debug("Episode CONTAINS fallback failed for %r: %s", kw, exc)
-            episode_contains_rows = sorted(
-                payloads.values(), key=lambda r: r.get("score", 0), reverse=True
-            )[:fetch_limit]
-
-        # Focus-term follow-up (Rachel / Miami / …): pull matching episodes
-        focus_terms = extract_query_focus_terms(query)
-        # Recommend+hotel: preference sessions may never say the destination name
-        if is_recommend_query(query) and "hotel" in query.lower():
-            for extra in ("hotel", "view", "rooftop", "balcony", "prefer"):
-                if extra not in [t.lower() for t in focus_terms]:
-                    focus_terms.append(extra)
-        # Recommend+pubs: pull demonstrated expertise sessions (not only venue words)
-        if is_recommend_query(query) and any(
-            w in query.lower()
-            for w in ("publication", "conference", "paper", "journal", "interesting")
-        ):
-            for extra in (
-                "my research",
-                "working in the field",
-                "research interest",
-                "skip the basics",
-                "deep learning for",
-            ):
-                if extra not in [t.lower() for t in focus_terms]:
-                    focus_terms.append(extra)
-        focus_hit_rows: list[dict] = []
-        for focus in focus_terms[:10]:
-            try:
-                rows = await self.driver.query_temporal(
-                    f"""
-                    MATCH (ep:Episode {{agent_namespace: $namespace}})
-                    WHERE toLower(ep.content) CONTAINS $kw
-                    {"AND ep.valid_at >= $after_unix" if after_unix is not None else ""}
-                    {"AND ep.valid_at <= $before_unix" if before_unix is not None else ""}
-                    RETURN ep.uuid AS uuid, ep.content AS content,
-                           ep.valid_at AS valid_at, ep.valid_at_human AS valid_at_human,
-                           ep.source_description AS source_description
-                    ORDER BY ep.valid_at DESC
-                    LIMIT $limit
-                    """,
-                    {
-                        "namespace": namespace,
-                        "kw": focus.lower(),
-                        "limit": max(fetch_limit, 20),
-                        **time_params,
-                    },
-                )
-                for r in rows:
-                    uid = r.get("uuid")
-                    if not uid:
-                        continue
-                    hit = {
-                        **r,
-                        "score": 0.72,
-                        "search_type": "focus_contains",
-                        "focus_term": focus,
-                    }
-                    episode_contains_rows.append(hit)
-                    focus_hit_rows.append(hit)
-            except Exception as exc:
-                logger.debug("Focus CONTAINS failed for %r: %s", focus, exc)
-
-        # Vector search on entity names
-        entity_rows = await self.driver.query_temporal(
-            """
-            CALL db.idx.vector.queryNodes('Entity', 'name_embedding', $limit, vecf32($embedding))
-            YIELD node, score
-            WHERE node.agent_namespace = $namespace
-            RETURN node.uuid AS uuid, node.name AS name,
-                   node.entity_type AS entity_type, score
-            """,
-            {"embedding": query_embedding, "namespace": namespace, "limit": limit},
-        )
-
-        # Vector search on facts
-        expired_filter = "" if include_expired else "AND r.expired_at IS NULL"
-        fact_rows = await self.driver.query_temporal(
-            f"""
-            CALL db.idx.vector.queryRelationships('RELATES_TO', 'fact_embedding', $limit, vecf32($embedding))
-            YIELD relationship AS r, score
-            WHERE r.agent_namespace = $namespace {expired_filter}
-            RETURN r.uuid AS uuid, r.fact AS fact,
-                   r.relation_type AS relation_type,
-                   r.valid_from AS valid_from, r.expired_at AS expired_at, score
-            """,
-            {"embedding": query_embedding, "namespace": namespace, "limit": limit},
-        )
-
-        def _norm_bm25(rows: list[dict]) -> list[dict]:
-            scores = [r.get("score", 0) for r in rows]
-            if not scores:
-                return rows
-            mn, mx = min(scores), max(scores)
-            if mn == mx:
-                return [{**r, "score": 1.0, "search_type": "bm25"} for r in rows]
-            return [{**r, "score": round((r.get("score", 0) - mn) / (mx - mn), 4),
-                     "search_type": "bm25"} for r in rows]
-
-        def _dist_to_sim(rows: list[dict], result_type: str) -> list[dict]:
-            return [{**r, "score": round(max(0.0, 1.0 - float(r.get("score", 1.0))), 4),
-                     "search_type": result_type} for r in rows]
-
-        def _norm_contains(rows: list[dict]) -> list[dict]:
-            if not rows:
-                return rows
-            scores = [float(r.get("score") or 0) for r in rows]
-            mx = max(scores) or 1.0
-            return [
-                {**r, "score": round(min(1.0, float(r.get("score") or 0) / mx), 4),
-                 "search_type": "contains"}
-                for r in rows
-            ]
-
-        ep_bm25_norm = _norm_bm25(episode_bm25_rows)
-        ep_vec_sim = _dist_to_sim(episode_vec_rows, "vector")
-        ep_contains_norm = _norm_contains(episode_contains_rows)
-        entity_sim = _dist_to_sim(entity_rows, "vector")
-        fact_sim = _dist_to_sim(fact_rows, "vector")
-
-        # Merge BM25 + vector + CONTAINS by uuid
-        ep_merged: dict[str, dict] = {}
-        for row in ep_bm25_norm + ep_vec_sim + ep_contains_norm:
-            uid = row.get("uuid", "")
-            if not uid:
-                continue
-            existing = ep_merged.get(uid)
-            if existing is None:
-                ep_merged[uid] = {**row, "result_type": "episode"}
-            elif row["score"] > existing["score"]:
-                merged = {**row, "result_type": "episode"}
-                merged["score"] = min(1.0, float(row["score"]) + 0.15)
-                ep_merged[uid] = merged
-            else:
-                existing["score"] = min(1.0, float(existing["score"]) + 0.1)
-
-        if not ep_merged and terms:
-            for row in ep_contains_norm:
-                uid = row.get("uuid", "")
-                if uid:
-                    ep_merged[uid] = {**row, "result_type": "episode"}
-
-        candidates = list(ep_merged.values())
-        # Force newest focus hits into the pool (Rachel suburbs / hotel prefs)
-        candidates = force_include_focus_episodes(candidates, focus_hit_rows, search_limit)
-        for row in candidates:
-            uid = row.get("uuid")
-            if uid:
-                ep_merged[uid] = row
-
-        # Pub recommend: second-pass CONTAINS only after a high-confidence
-        # non-SoP specialty is found in the already-retrieved pool
-        ql = query.lower()
-        if is_recommend_query(query) and any(
-            w in ql for w in ("publication", "conference", "paper", "journal", "interesting")
-        ):
-            domain_scores: dict[str, float] = {}
-            for row in candidates:
-                content = row.get("content") or ""
-                if _SOP_NOISE_RE.search(content):
-                    continue
-                domain, depth = score_domain_depth(content)
-                if domain and depth >= 3.0:
-                    domain_scores[domain] = max(domain_scores.get(domain, 0), depth)
-            if domain_scores:
-                top_domain = max(domain_scores, key=domain_scores.get)
-                for kw in list(_DOMAIN_LEXICONS.get(top_domain, ()))[:4]:
-                    try:
-                        rows = await self.driver.query_temporal(
-                            f"""
-                            MATCH (ep:Episode {{agent_namespace: $namespace}})
-                            WHERE toLower(ep.content) CONTAINS $kw
-                            {"AND ep.valid_at >= $after_unix" if after_unix is not None else ""}
-                            {"AND ep.valid_at <= $before_unix" if before_unix is not None else ""}
-                            RETURN ep.uuid AS uuid, ep.content AS content,
-                                   ep.valid_at AS valid_at, ep.valid_at_human AS valid_at_human,
-                                   ep.source_description AS source_description
-                            ORDER BY ep.valid_at DESC
-                            LIMIT $limit
-                            """,
-                            {
-                                "namespace": namespace,
-                                "kw": kw.lower(),
-                                "limit": max(fetch_limit, 20),
-                                **time_params,
-                            },
-                        )
-                        for r in rows:
-                            uid = r.get("uuid")
-                            if not uid:
-                                continue
-                            existing = ep_merged.get(uid)
-                            bump = {
-                                **r,
-                                "score": 0.88,
-                                "search_type": "expertise_contains",
-                                "expertise_domain": top_domain,
-                                "result_type": "episode",
-                            }
-                            if existing is None:
-                                ep_merged[uid] = bump
-                            else:
-                                existing["score"] = max(float(existing.get("score") or 0), 0.88)
-                                existing["expertise_domain"] = top_domain
-                    except Exception as exc:
-                        logger.debug("Expertise CONTAINS failed for %r: %s", kw, exc)
-                candidates = list(ep_merged.values())
-
-        candidates = force_include_expertise_episodes(candidates, query, search_limit)
-        # C3 preference / errand boost → C1 recency → C2 session diversity
-        candidates = apply_preference_boost(candidates, query)
-        candidates = apply_errand_boost(candidates, query)
-        candidates, conflicts = apply_recency_packaging(candidates)
-        episodes_final = [
-            package_episode_row(r, query)
-            for r in diversify_by_source(candidates, search_limit)
-        ][:limit]
-        episodes_final = prioritize_query_entity_recency(episodes_final, query)
-        episodes_final = order_hits_for_answer(episodes_final)
-
-        all_results: list[dict] = (
-            [{**r, "result_type": "episode"} for r in episodes_final]
-            + [{**r, "result_type": "entity"} for r in entity_sim]
-            + [{**r, "result_type": "fact"} for r in fact_sim]
-        )
-        ranked = sorted(all_results, key=lambda x: x.get("score", 0), reverse=True)[:limit]
-
-        digests: dict[str, str] = {}
-        if is_recommend_query(query):
-            pref = build_preference_digest(episodes_final)
-            if pref:
-                digests["preferences"] = pref
-            exp = build_expertise_digest(episodes_final, query)
-            if exp:
-                digests["expertise"] = exp
-        if is_count_query(query):
-            inv = build_inventory_digest(episodes_final, query)
-            if inv:
-                digests["inventory"] = inv
-
-        _result = {
-            "episodes": episodes_final,
-            "entities": entity_sim,
-            "facts": fact_sim,
-            "ranked": ranked,
-            "conflicts": conflicts,
-            "bm25_query": bm25_query,
-            "subqueries": subqueries,
-            "digests": digests,
-        }
-
-        _returned_uuids = [ep["uuid"] for ep in episodes_final if ep.get("uuid")]
+        _returned_uuids = [ep["uuid"] for ep in result.get("episodes", []) if ep.get("uuid")]
         if _returned_uuids:
             asyncio.create_task(self._increment_access_counts(_returned_uuids))
-
-        return _result
+        return result
 
     # v0.9: fire-and-forget access_count increment on returned episodes
     async def _increment_access_counts(self, uuids: list[str]) -> None:

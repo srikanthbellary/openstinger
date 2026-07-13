@@ -57,6 +57,9 @@ dev = [
     "mypy>=1.10.0",
     "ruff>=0.4.0",
 ]
+rerank = [
+    "sentence-transformers>=3.0.0",
+]
 postgres = [
     "asyncpg>=0.30.0",
     "psycopg2-binary>=2.9.9",
