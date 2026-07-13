@@ -102,6 +102,8 @@ async def main() -> int:
         embedder=embedder,
         entity_registry=registry,
         agent_namespace=test_ns,
+        retrieval_config=cfg.retrieval,
+        extract_statements=False,  # smoke write is raw persist; skip extra LLM
     )
 
     print(f"=== C: write isolated episode in {test_ns} ===")
@@ -137,11 +139,16 @@ async def main() -> int:
     assert hit.get("source_description") == "v010_regression_smoke", hit
     assert hit.get("valid_at_human"), f"missing valid_at_human: {hit}"
     assert qm.get("bm25_query"), "missing bm25_query echo"
+    assert "retrieval_confidence" in qm, "missing retrieval_confidence"
+    assert "pipeline" in qm and "channels_run" in (qm.get("pipeline") or {}), qm.get("pipeline")
+    assert "abstain_suggested" in qm
     print(
         f"OK query_memory hit score={hit.get('score')} "
         f"source={hit.get('source_description')!r} "
         f"when={hit.get('valid_at_human')!r} "
         f"bm25={qm.get('bm25_query')!r} "
+        f"conf={qm.get('retrieval_confidence')} "
+        f"channels={qm.get('pipeline', {}).get('channels_run')} "
         f"elapsed={elapsed_qm}s"
     )
 
