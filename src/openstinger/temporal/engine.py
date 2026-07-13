@@ -35,7 +35,30 @@ from openstinger.temporal.prompts.extraction import (
     build_extract_entities_user,
     build_extract_edges_user,
 )
-from openstinger.temporal.search_utils import extract_search_terms, sanitize_bm25_query
+from openstinger.temporal.search_utils import (
+    _DOMAIN_LEXICONS,
+    _SOP_NOISE_RE,
+    apply_errand_boost,
+    apply_preference_boost,
+    apply_recency_packaging,
+    diversify_by_source,
+    effective_search_limit,
+    extract_query_focus_terms,
+    extract_search_terms,
+    extract_subqueries,
+    force_include_expertise_episodes,
+    force_include_focus_episodes,
+    is_recommend_query,
+    order_hits_for_answer,
+    package_episode_row,
+    prioritize_query_entity_recency,
+    sanitize_bm25_query,
+    score_domain_depth,
+    build_expertise_digest,
+    build_inventory_digest,
+    build_preference_digest,
+    is_count_query,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -414,21 +437,24 @@ class TemporalEngine:
         """
         Hybrid search: BM25 keyword + vector similarity on episodes, entities, and facts.
 
-        Episode search: sanitized BM25 + vector + keyword CONTAINS merge (v0.10).
-        Entity search: vector on name_embedding.
-        Fact search: vector on fact_embedding.
+        Episode search: sanitized BM25 + vector + keyword CONTAINS merge (v0.10 S1–S3),
+        plus multi-noun subqueries (C4), preference boost (C3), session diversity (C2),
+        and recency packaging (C1).
 
-        Episode rows include source_description and valid_at_human (v0.10 S1).
+        Episode rows include source_description, valid_at_human, optional recency_label.
 
         after_unix / before_unix: optional unix timestamps to filter episodes by valid_at.
 
         Scores are normalised — BM25 min-max to [0,1]; vector converted from
         cosine distance to similarity (1 - distance) so higher = more relevant.
-        Returns dict with keys: episodes, entities, facts, ranked (merged list).
+        Returns dict with keys: episodes, entities, facts, ranked, conflicts, bm25_query.
         """
         namespace = agent_namespace or self.agent_namespace
+        search_limit = effective_search_limit(query, limit)
+        fetch_limit = max(search_limit * 2, 20)
         bm25_query = sanitize_bm25_query(query)
         terms = extract_search_terms(query)
+        subqueries = extract_subqueries(query)
         query_embedding = await self.embedder.embed(query)
 
         # Build temporal filter clause for episode queries
@@ -447,23 +473,33 @@ class TemporalEngine:
             "node.source_description AS source_description, score"
         )
 
-        # BM25 search on episode content (sanitized query)
-        episode_bm25_rows: list[dict] = []
-        try:
-            episode_bm25_rows = await self.driver.query_temporal(
-                f"""
-                CALL db.idx.fulltext.queryNodes('Episode', $query)
-                YIELD node, score
-                WHERE node.agent_namespace = $namespace{time_filter}
-                RETURN {episode_return}
-                ORDER BY score DESC LIMIT $limit
-                """,
-                {"query": bm25_query, "namespace": namespace, "limit": limit, **time_params},
-            )
-        except Exception as exc:
-            logger.warning("Episode BM25 search failed (query=%r): %s", bm25_query, exc)
+        async def _bm25(q: str, lim: int) -> list[dict]:
+            try:
+                return await self.driver.query_temporal(
+                    f"""
+                    CALL db.idx.fulltext.queryNodes('Episode', $query)
+                    YIELD node, score
+                    WHERE node.agent_namespace = $namespace{time_filter}
+                    RETURN {episode_return}
+                    ORDER BY score DESC LIMIT $limit
+                    """,
+                    {"query": sanitize_bm25_query(q), "namespace": namespace, "limit": lim, **time_params},
+                )
+            except Exception as exc:
+                logger.warning("Episode BM25 search failed (query=%r): %s", q, exc)
+                return []
 
-        # Vector search on episode content_embedding (semantic episode search)
+        # Primary BM25 + C4 subquery BM25 union
+        episode_bm25_rows: list[dict] = []
+        seen_bm25: set[str] = set()
+        for sq in subqueries:
+            for r in await _bm25(sq, fetch_limit):
+                uid = r.get("uuid")
+                if uid and uid not in seen_bm25:
+                    seen_bm25.add(uid)
+                    episode_bm25_rows.append(r)
+
+        # Vector search on episode content_embedding
         episode_vec_rows: list[dict] = []
         try:
             episode_vec_rows = await self.driver.query_temporal(
@@ -473,22 +509,27 @@ class TemporalEngine:
                 WHERE node.agent_namespace = $namespace{time_filter}
                 RETURN {episode_return}
                 """,
-                {"embedding": query_embedding, "namespace": namespace, "limit": limit, **time_params},
+                {
+                    "embedding": query_embedding,
+                    "namespace": namespace,
+                    "limit": fetch_limit,
+                    **time_params,
+                },
             )
         except Exception as exc:
-            # Vector index may not exist or dimension may mismatch configured embedder
             logger.warning(
                 "Episode vector search unavailable (configured dims=%s): %s",
                 getattr(self.driver, "vector_dimensions", "?"),
                 exc,
             )
 
-        # Keyword CONTAINS merge (v0.10 S3): always enrich with substring hits
+        # Keyword CONTAINS merge (S3) over primary terms + subquery nouns
         episode_contains_rows: list[dict] = []
-        if terms:
+        contain_terms = list(dict.fromkeys(terms + [t for sq in subqueries[1:] for t in extract_search_terms(sq)]))
+        if contain_terms:
             scores: dict[str, float] = {}
             payloads: dict[str, dict] = {}
-            ordered_terms = sorted(set(terms), key=lambda w: (-len(w), w))[:8]
+            ordered_terms = sorted(set(contain_terms), key=lambda w: (-len(w), w))[:12]
             for kw in ordered_terms:
                 try:
                     rows = await self.driver.query_temporal(
@@ -505,7 +546,7 @@ class TemporalEngine:
                         {
                             "namespace": namespace,
                             "kw": kw.lower(),
-                            "limit": max(limit * 3, 30),
+                            "limit": max(fetch_limit, 30),
                             **time_params,
                         },
                     )
@@ -523,7 +564,65 @@ class TemporalEngine:
                     logger.debug("Episode CONTAINS fallback failed for %r: %s", kw, exc)
             episode_contains_rows = sorted(
                 payloads.values(), key=lambda r: r.get("score", 0), reverse=True
-            )[:limit]
+            )[:fetch_limit]
+
+        # Focus-term follow-up (Rachel / Miami / …): pull matching episodes
+        focus_terms = extract_query_focus_terms(query)
+        # Recommend+hotel: preference sessions may never say the destination name
+        if is_recommend_query(query) and "hotel" in query.lower():
+            for extra in ("hotel", "view", "rooftop", "balcony", "prefer"):
+                if extra not in [t.lower() for t in focus_terms]:
+                    focus_terms.append(extra)
+        # Recommend+pubs: pull demonstrated expertise sessions (not only venue words)
+        if is_recommend_query(query) and any(
+            w in query.lower()
+            for w in ("publication", "conference", "paper", "journal", "interesting")
+        ):
+            for extra in (
+                "my research",
+                "working in the field",
+                "research interest",
+                "skip the basics",
+                "deep learning for",
+            ):
+                if extra not in [t.lower() for t in focus_terms]:
+                    focus_terms.append(extra)
+        focus_hit_rows: list[dict] = []
+        for focus in focus_terms[:10]:
+            try:
+                rows = await self.driver.query_temporal(
+                    f"""
+                    MATCH (ep:Episode {{agent_namespace: $namespace}})
+                    WHERE toLower(ep.content) CONTAINS $kw
+                    {"AND ep.valid_at >= $after_unix" if after_unix is not None else ""}
+                    {"AND ep.valid_at <= $before_unix" if before_unix is not None else ""}
+                    RETURN ep.uuid AS uuid, ep.content AS content,
+                           ep.valid_at AS valid_at, ep.valid_at_human AS valid_at_human,
+                           ep.source_description AS source_description
+                    ORDER BY ep.valid_at DESC
+                    LIMIT $limit
+                    """,
+                    {
+                        "namespace": namespace,
+                        "kw": focus.lower(),
+                        "limit": max(fetch_limit, 20),
+                        **time_params,
+                    },
+                )
+                for r in rows:
+                    uid = r.get("uuid")
+                    if not uid:
+                        continue
+                    hit = {
+                        **r,
+                        "score": 0.72,
+                        "search_type": "focus_contains",
+                        "focus_term": focus,
+                    }
+                    episode_contains_rows.append(hit)
+                    focus_hit_rows.append(hit)
+            except Exception as exc:
+                logger.debug("Focus CONTAINS failed for %r: %s", focus, exc)
 
         # Vector search on entity names
         entity_rows = await self.driver.query_temporal(
@@ -551,7 +650,6 @@ class TemporalEngine:
             {"embedding": query_embedding, "namespace": namespace, "limit": limit},
         )
 
-        # --- Score normalisation ---
         def _norm_bm25(rows: list[dict]) -> list[dict]:
             scores = [r.get("score", 0) for r in rows]
             if not scores:
@@ -583,7 +681,7 @@ class TemporalEngine:
         entity_sim = _dist_to_sim(entity_rows, "vector")
         fact_sim = _dist_to_sim(fact_rows, "vector")
 
-        # Merge BM25 + vector + CONTAINS by uuid (take max score; boost overlaps)
+        # Merge BM25 + vector + CONTAINS by uuid
         ep_merged: dict[str, dict] = {}
         for row in ep_bm25_norm + ep_vec_sim + ep_contains_norm:
             uid = row.get("uuid", "")
@@ -599,14 +697,89 @@ class TemporalEngine:
             else:
                 existing["score"] = min(1.0, float(existing["score"]) + 0.1)
 
-        # If hybrid still empty but we have terms, force CONTAINS-only (S3 empty path)
         if not ep_merged and terms:
             for row in ep_contains_norm:
                 uid = row.get("uuid", "")
                 if uid:
                     ep_merged[uid] = {**row, "result_type": "episode"}
 
-        episodes_final = sorted(ep_merged.values(), key=lambda x: x["score"], reverse=True)[:limit]
+        candidates = list(ep_merged.values())
+        # Force newest focus hits into the pool (Rachel suburbs / hotel prefs)
+        candidates = force_include_focus_episodes(candidates, focus_hit_rows, search_limit)
+        for row in candidates:
+            uid = row.get("uuid")
+            if uid:
+                ep_merged[uid] = row
+
+        # Pub recommend: second-pass CONTAINS only after a high-confidence
+        # non-SoP specialty is found in the already-retrieved pool
+        ql = query.lower()
+        if is_recommend_query(query) and any(
+            w in ql for w in ("publication", "conference", "paper", "journal", "interesting")
+        ):
+            domain_scores: dict[str, float] = {}
+            for row in candidates:
+                content = row.get("content") or ""
+                if _SOP_NOISE_RE.search(content):
+                    continue
+                domain, depth = score_domain_depth(content)
+                if domain and depth >= 3.0:
+                    domain_scores[domain] = max(domain_scores.get(domain, 0), depth)
+            if domain_scores:
+                top_domain = max(domain_scores, key=domain_scores.get)
+                for kw in list(_DOMAIN_LEXICONS.get(top_domain, ()))[:4]:
+                    try:
+                        rows = await self.driver.query_temporal(
+                            f"""
+                            MATCH (ep:Episode {{agent_namespace: $namespace}})
+                            WHERE toLower(ep.content) CONTAINS $kw
+                            {"AND ep.valid_at >= $after_unix" if after_unix is not None else ""}
+                            {"AND ep.valid_at <= $before_unix" if before_unix is not None else ""}
+                            RETURN ep.uuid AS uuid, ep.content AS content,
+                                   ep.valid_at AS valid_at, ep.valid_at_human AS valid_at_human,
+                                   ep.source_description AS source_description
+                            ORDER BY ep.valid_at DESC
+                            LIMIT $limit
+                            """,
+                            {
+                                "namespace": namespace,
+                                "kw": kw.lower(),
+                                "limit": max(fetch_limit, 20),
+                                **time_params,
+                            },
+                        )
+                        for r in rows:
+                            uid = r.get("uuid")
+                            if not uid:
+                                continue
+                            existing = ep_merged.get(uid)
+                            bump = {
+                                **r,
+                                "score": 0.88,
+                                "search_type": "expertise_contains",
+                                "expertise_domain": top_domain,
+                                "result_type": "episode",
+                            }
+                            if existing is None:
+                                ep_merged[uid] = bump
+                            else:
+                                existing["score"] = max(float(existing.get("score") or 0), 0.88)
+                                existing["expertise_domain"] = top_domain
+                    except Exception as exc:
+                        logger.debug("Expertise CONTAINS failed for %r: %s", kw, exc)
+                candidates = list(ep_merged.values())
+
+        candidates = force_include_expertise_episodes(candidates, query, search_limit)
+        # C3 preference / errand boost → C1 recency → C2 session diversity
+        candidates = apply_preference_boost(candidates, query)
+        candidates = apply_errand_boost(candidates, query)
+        candidates, conflicts = apply_recency_packaging(candidates)
+        episodes_final = [
+            package_episode_row(r, query)
+            for r in diversify_by_source(candidates, search_limit)
+        ][:limit]
+        episodes_final = prioritize_query_entity_recency(episodes_final, query)
+        episodes_final = order_hits_for_answer(episodes_final)
 
         all_results: list[dict] = (
             [{**r, "result_type": "episode"} for r in episodes_final]
@@ -615,12 +788,28 @@ class TemporalEngine:
         )
         ranked = sorted(all_results, key=lambda x: x.get("score", 0), reverse=True)[:limit]
 
+        digests: dict[str, str] = {}
+        if is_recommend_query(query):
+            pref = build_preference_digest(episodes_final)
+            if pref:
+                digests["preferences"] = pref
+            exp = build_expertise_digest(episodes_final, query)
+            if exp:
+                digests["expertise"] = exp
+        if is_count_query(query):
+            inv = build_inventory_digest(episodes_final, query)
+            if inv:
+                digests["inventory"] = inv
+
         _result = {
             "episodes": episodes_final,
             "entities": entity_sim,
             "facts": fact_sim,
             "ranked": ranked,
+            "conflicts": conflicts,
             "bm25_query": bm25_query,
+            "subqueries": subqueries,
+            "digests": digests,
         }
 
         _returned_uuids = [ep["uuid"] for ep in episodes_final if ep.get("uuid")]

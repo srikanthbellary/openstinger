@@ -77,6 +77,10 @@ TOOL_SCHEMAS: list[types.Tool] = [
         name="memory_query",
         description=(
             "Hybrid semantic search (BM25 + vector) across episodes, entities, and facts. "
+            "Episode rows may include cue_summary / cues (stores, actions, preferences), "
+            "recency_label (newer/older), and [LATEST update] banners for named entities. "
+            "Prefer NEWER / LATEST facts when locations conflict; treat session cues as "
+            "same-conversation links (e.g. store named earlier, purchase later). "
             "Returns a unified 'ranked' list with normalized scores (all comparable 0.0–1.0). "
             "Use after_date / before_date to restrict to a time window (e.g. after_date='2026-02')."
         ),

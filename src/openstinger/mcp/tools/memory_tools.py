@@ -166,6 +166,9 @@ async def memory_query(
     return {
         "query": query,
         "bm25_query": results.get("bm25_query"),
+        "subqueries": results.get("subqueries"),
+        "conflicts": results.get("conflicts", []),
+        "digests": results.get("digests", {}),
         "namespace": namespace,
         "after_date": after_date,
         "before_date": before_date,
