@@ -314,6 +314,13 @@ def test_activity_and_topic_digests():
 
     assert is_activity_duration_query("How many hours of jogging and yoga did I do last week?")
     assert is_topic_inventory_query("How many model kits have I worked on or bought?")
+    assert is_topic_inventory_query(
+        "How many music albums or EPs have I purchased or downloaded?"
+    )
+    assert not is_topic_inventory_query(
+        "How many days passed between the day I cancelled my subscription "
+        "and the day I did my online grocery shopping?"
+    )
     act_hits = [
         {
             "source_description": "s1",

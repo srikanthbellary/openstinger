@@ -243,13 +243,23 @@ def is_activity_duration_query(query: str) -> bool:
     )
 
 
+_TEMPORAL_SPAN_COUNT_RE = re.compile(
+    r"\bhow many days\b|"
+    r"\b(?:days?|weeks?|months?|years?)\b.{0,40}\b(?:pass|passed|between|since|until|apart)\b|"
+    r"\bbetween the day\b",
+    re.I,
+)
+
+
 def is_topic_inventory_query(query: str) -> bool:
-    """Non-errand, non-duration count questions (kits, albums, purchases)."""
-    return (
-        is_count_query(query)
-        and not is_errand_count_query(query)
-        and not is_activity_duration_query(query)
-    )
+    """Non-errand, non-duration, non-temporal item/project counts (kits, albums)."""
+    if not is_count_query(query):
+        return False
+    if is_errand_count_query(query) or is_activity_duration_query(query):
+        return False
+    if _TEMPORAL_SPAN_COUNT_RE.search(query or ""):
+        return False
+    return bool(extract_topic_nouns(query) or extract_topic_phrases(query))
 
 
 def content_has_preference_cues(content: str) -> bool:
