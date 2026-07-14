@@ -1391,6 +1391,7 @@ def build_topic_inventory_digest(hits: list[dict], query: str = "") -> str:
         snippet = re.sub(r"\s+", " ", content[start:end]).strip()
         lines.append(f"- ({sid}) [{', '.join(matched[:3])}] {snippet}")
         n += 1
+        session_had_quoted = False
         for m in _PURCHASE_TITLE_RE.finditer(content):
             span = re.sub(r"\s+", " ", m.group(0)).strip()
             quoted = _QUOTED_TITLE_RE.findall(span) or _QUOTED_TITLE_RE.findall(
@@ -1402,18 +1403,26 @@ def build_topic_inventory_digest(hits: list[dict], query: str = "") -> str:
                     if key and key not in seen_titles:
                         seen_titles.add(key)
                         title_hints.append(qt.strip())
+                        session_had_quoted = True
             else:
+                # Keep short purchase spans only (avoid long assistant chatter)
+                if len(span) > 80:
+                    continue
                 key = span.lower()[:80]
                 if key and key not in seen_titles:
                     seen_titles.add(key)
-                    title_hints.append(span[:100])
-        # Vinyl without a quoted title still counts as a distinct music purchase
-        for m in re.finditer(r".{0,50}\bvinyl\b.{0,50}", content, re.I):
-            span = re.sub(r"\s+", " ", m.group(0)).strip()
-            key = span.lower()
-            if key and key not in seen_titles:
+                    title_hints.append(span[:80])
+        # At most one untitled vinyl credit per session
+        if re.search(r"\bvinyl\b", content, re.I) and not session_had_quoted:
+            am = re.search(
+                r"\b([A-Z][\w']+(?:\s+[A-Z][\w']+){0,3})\s+vinyl\b",
+                content,
+            )
+            label = f"{am.group(1)} vinyl" if am else "purchased vinyl"
+            key = label.lower()
+            if key not in seen_titles:
                 seen_titles.add(key)
-                title_hints.append(span[:100])
+                title_hints.append(label)
         if n >= 8:
             break
     if n == 0:
