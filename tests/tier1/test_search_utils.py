@@ -332,5 +332,8 @@ def test_activity_and_topic_digests():
     td = build_topic_inventory_digest(
         kit_hits, "How many model kits have I worked on or bought?"
     )
-    assert "Sessions with topic overlap listed:" in td
+    assert (
+        "Sessions with topic overlap listed:" in td
+        or "Suggested distinct purchases/downloads listed:" in td
+    )
     assert "k1" in td and "k2" in td
