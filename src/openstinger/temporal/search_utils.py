@@ -31,31 +31,96 @@ _PREF_CUE_RE = re.compile(
     re.I,
 )
 _NAME_IN_QUERY = re.compile(r"\b([A-Z][a-z]{2,})\b")
+_PAREN_ACRONYM_RE = re.compile(r"\(([A-Z][A-Za-z0-9]{1,7})\)")
+_MIXED_ACRONYM_RE = re.compile(r"\b([A-Z][a-z]*[A-Z][A-Za-z]{0,4})\b")
+_PROPER_PHRASE_RE = re.compile(
+    r"\b([A-Z][a-z]+(?:\s+(?:of|the|and|at|in)\s+[A-Z][a-z]+|\s+[A-Z][a-z]+){1,5})\b"
+)
+_MONTH_NAME_STOP = {
+    "how", "what", "when", "where", "which", "can", "the", "you",
+    "march", "april", "june", "july", "august", "september", "october",
+    "november", "december", "monday", "tuesday", "wednesday", "thursday",
+    "friday", "saturday", "sunday", "museum", "art", "modern", "ancient",
+    "civilizations", "exhibit", "events", "charity",
+}
 _PHRASE_STOP = _STOP | {
     "passed", "between", "visit", "helped", "friend", "cousin", "ordered",
     "happened", "events", "order", "days", "day", "worked", "bought",
 }
 
+
 def extract_query_focus_terms(query: str) -> list[str]:
     """
-    Proper names / places capitalized in the question (Rachel, Miami, Target).
-    Used to force CONTAINS follow-up so updates and preferences are not missed.
+    Proper names, acronyms, and venue phrases from the question.
+
+    Used to force CONTAINS follow-up so updates, venues, and preferences are not missed.
     """
-    found = []
+    found: list[str] = []
     seen: set[str] = set()
-    for m in _NAME_IN_QUERY.findall(query or ""):
-        low = m.lower()
-        if low in _STOP or low in {
-            "how", "what", "when", "where", "which", "can", "the", "you",
-            "march", "april", "june", "july", "august", "september", "october",
-            "november", "december", "monday", "tuesday", "wednesday", "thursday",
-            "friday", "saturday", "sunday",
-        }:
-            continue
+
+    def _add(term: str) -> None:
+        t = (term or "").strip()
+        if len(t) < 2:
+            return
+        low = t.lower()
+        if low in _STOP or low in _MONTH_NAME_STOP:
+            return
+        # Drop weak phrase fragments
+        if low.startswith("of ") or low.endswith(" of") or low in {"museum of", "of art"}:
+            return
         if low not in seen:
             seen.add(low)
-            found.append(m)
+            found.append(t)
+
+    q = query or ""
+    # Multi-word venues first (Museum of Modern Art, Metropolitan Museum of Art)
+    for phrase in _PROPER_PHRASE_RE.findall(q):
+        _add(phrase)
+        # Also keep a shorter 2-token tail when useful (Metropolitan Museum)
+        parts = phrase.split()
+        if len(parts) >= 2:
+            _add(" ".join(parts[:2]))
+            _add(" ".join(parts[-2:]))
+    for ac in _PAREN_ACRONYM_RE.findall(q):
+        _add(ac)
+    for ac in _MIXED_ACRONYM_RE.findall(q):
+        _add(ac)
+    for m in _NAME_IN_QUERY.findall(q):
+        _add(m)
     return found
+
+
+def is_temporal_span_query(query: str) -> bool:
+    """Days/weeks/months between two events (MoMA vs Met, charity streak, etc.)."""
+    return bool(_TEMPORAL_SPAN_COUNT_RE.search(query or ""))
+
+
+def extract_temporal_anchors(query: str) -> list[str]:
+    """
+    Anchors for temporal-span CONTAINS: proper names/venues, else content nouns.
+    """
+    focus = extract_query_focus_terms(query)
+    if focus:
+        return focus
+    skip = {
+        "days", "day", "weeks", "week", "months", "month", "years", "year",
+        "row", "consecutive", "passed", "since", "between", "participated",
+        "visit", "exhibit", "two", "three", "four", "five", "six", "seven",
+        "eight", "nine", "ten", "many", "number", "total",
+    }
+    out: list[str] = []
+    seen: set[str] = set()
+    for p in extract_topic_phrases(query, max_n=6):
+        if p in seen or any(tok in skip for tok in p.split()):
+            continue
+        seen.add(p)
+        out.append(p)
+    for n in extract_topic_nouns(query, max_n=10):
+        if n in skip or n in seen or n.isdigit():
+            continue
+        seen.add(n)
+        out.append(n)
+    return out
 
 
 
@@ -244,9 +309,11 @@ def is_activity_duration_query(query: str) -> bool:
 
 
 _TEMPORAL_SPAN_COUNT_RE = re.compile(
-    r"\bhow many days\b|"
+    r"\bhow many (?:days?|weeks?|months?|years?)\b|"
     r"\b(?:days?|weeks?|months?|years?)\b.{0,40}\b(?:pass|passed|between|since|until|apart)\b|"
-    r"\bbetween the day\b",
+    r"\bbetween the day\b|"
+    r"\bpassed between\b|"
+    r"\bhave passed since\b",
     re.I,
 )
 
@@ -1096,9 +1163,61 @@ def effective_search_limit(query: str, limit: int) -> int:
         w in q for w in ("publication", "conference", "paper", "journal", "interesting")
     ):
         return max(base, 16)
+    if is_temporal_span_query(query):
+        return max(base, 14)
     if is_recommend_query(query) or is_count_query(query) or is_preference_context_query(query):
         return max(base, 12)
     return base
+
+
+def build_temporal_span_digest(hits: list[dict], query: str = "") -> str:
+    """
+    Surface dated snippets that match venue/event anchors in a span question.
+
+    Helps answer models compute day/month deltas instead of abstaining.
+    """
+    if not is_temporal_span_query(query) or not hits:
+        return ""
+    anchors = extract_temporal_anchors(query)
+    if not anchors:
+        return ""
+    lines = [
+        "Dated event anchors found in memory "
+        "(use these timestamps to answer how many days/months/years passed):",
+    ]
+    n = 0
+    seen_sid: set[str] = set()
+    for h in hits:
+        content = h.get("content") or ""
+        cl = content.lower()
+        matched = [a for a in anchors if a.lower() in cl]
+        if not matched:
+            continue
+        sid = (h.get("source_description") or h.get("uuid") or "?").strip()
+        if sid in seen_sid:
+            continue
+        seen_sid.add(sid)
+        when = h.get("valid_at_human") or ""
+        idxs = [cl.find(a.lower()) for a in matched if cl.find(a.lower()) >= 0]
+        idx = min(idxs) if idxs else 0
+        start = max(0, idx - 40)
+        end = min(len(content), idx + 100)
+        snippet = re.sub(r"\s+", " ", content[start:end]).strip()
+        stamp = f" @{when}" if when else ""
+        lines.append(
+            f"- ({sid}){stamp} [{', '.join(matched[:3])}]: {snippet}"
+        )
+        n += 1
+        if n >= 6:
+            break
+    if n == 0:
+        return ""
+    lines.append(
+        "Compute the asked span from the event dates (or session timestamps). "
+        "Answer with a single integer in the asked unit (days/months/years). "
+        "Do not abstain when two dated on-topic events are listed."
+    )
+    return "\n".join(lines)
 
 
 def prioritize_query_entity_recency(episodes: list[dict], query: str) -> list[dict]:

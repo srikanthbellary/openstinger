@@ -11,6 +11,32 @@ from openstinger.temporal.search_utils import (
 )
 
 
+def test_focus_terms_capture_venues_and_acronyms():
+    from openstinger.temporal.search_utils import (
+        extract_query_focus_terms,
+        extract_temporal_anchors,
+        is_temporal_span_query,
+    )
+
+    q = (
+        "How many days passed between my visit to the Museum of Modern Art (MoMA) "
+        "and the Ancient Civilizations exhibit at the Metropolitan Museum of Art?"
+    )
+    assert is_temporal_span_query(q)
+    focus = [t.lower() for t in extract_query_focus_terms(q)]
+    assert any("moma" == t for t in focus)
+    assert any("museum of modern art" == t for t in focus)
+    assert any("metropolitan" in t for t in focus)
+
+    q2 = (
+        "How many months have passed since I participated in two charity events "
+        "in a row, on consecutive days?"
+    )
+    assert is_temporal_span_query(q2)
+    anchors = [t.lower() for t in extract_temporal_anchors(q2)]
+    assert "charity" in anchors or "events" in anchors
+
+
 def test_sanitize_quotes_terms_and_drops_stopwords():
     q = sanitize_bm25_query("What was the last degree I graduated with?")
     assert '"degree"' in q

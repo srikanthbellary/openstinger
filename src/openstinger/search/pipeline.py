@@ -22,6 +22,7 @@ from openstinger.temporal.search_utils import (
     diversify_by_source,
     effective_search_limit,
     extract_query_focus_terms,
+    extract_temporal_anchors,
     extract_search_terms,
     extract_subqueries,
     extract_topic_nouns,
@@ -34,6 +35,7 @@ from openstinger.temporal.search_utils import (
     is_errand_count_query,
     is_preference_context_query,
     is_recommend_query,
+    is_temporal_span_query,
     is_topic_inventory_query,
     package_episode_row,
     prioritize_query_entity_recency,
@@ -42,6 +44,7 @@ from openstinger.temporal.search_utils import (
     build_expertise_digest,
     build_inventory_digest,
     build_preference_digest,
+    build_temporal_span_digest,
     build_topic_inventory_digest,
 )
 
@@ -236,6 +239,11 @@ class RetrievalPipeline:
 
         # Focus terms → generic CONTAINS (no score injection); entity routing in graph
         focus_terms = extract_query_focus_terms(query)
+        if is_temporal_span_query(query):
+            # Merge untitled event nouns (charity events) into focus CONTAINS
+            for a in extract_temporal_anchors(query):
+                if a.lower() not in {t.lower() for t in focus_terms}:
+                    focus_terms.append(a)
         if cfg.experimental_lexicons:
             focus_terms = self._experimental_focus_extras(query, focus_terms)
         focus_rows = await self._focus_contains(
@@ -313,9 +321,18 @@ class RetrievalPipeline:
         }
         # Statements are episode-like for ranking into episode list when they carry episode uuid
         # For now statements returned as separate facts-like; also promote to episode if linked
+        fuse_weights = self._weights()
+        if is_temporal_span_query(query):
+            # Named venues/events in span questions need CONTAINS to beat generic chat noise
+            fuse_weights["focus_contains"] = max(
+                float(fuse_weights.get("focus_contains") or 0.6), 1.25
+            )
+            fuse_weights["contains_terms"] = max(
+                float(fuse_weights.get("contains_terms") or 0.7), 1.0
+            )
         fused_pool = rrf_fuse(
             {k: v for k, v in channels.items() if k not in {"vector_facts", "graph_facts"}},
-            weights=self._weights(),
+            weights=fuse_weights,
             k=cfg.rrf_k,
             limit=fetch_limit,
         )
@@ -392,16 +409,35 @@ class RetrievalPipeline:
         fused_pool = force_include_focus_episodes(
             fused_pool, focus_rows or [], fetch_limit
         )
+        if is_temporal_span_query(query):
+            for r in fused_pool:
+                if r.get("focus_forced") or r.get("search_type") == "focus_contains":
+                    r["score"] = max(float(r.get("score") or 0), 0.92)
+                    r["fusion_score"] = max(float(r.get("fusion_score") or 0), 0.92)
+                    r["focus_forced"] = True
 
-        boosted = is_recommend_query(query) or is_preference_context_query(query)
+        boosted = (
+            is_recommend_query(query)
+            or is_preference_context_query(query)
+            or is_temporal_span_query(query)
+        )
 
         # C1 labels/conflicts
         labeled, conflicts = apply_recency_packaging(fused_pool)
-        if boosted or is_topic_inventory_query(query) or is_activity_duration_query(query):
+        if (
+            boosted
+            or is_topic_inventory_query(query)
+            or is_activity_duration_query(query)
+            or is_temporal_span_query(query)
+        ):
             ordered = sorted(
                 labeled,
                 key=lambda r: (
-                    0 if r.get("topic_forced") or r.get("expertise_forced") else 1,
+                    0
+                    if r.get("topic_forced")
+                    or r.get("expertise_forced")
+                    or r.get("focus_forced")
+                    else 1,
                     -float(r.get("score") or 0),
                 ),
             )
@@ -463,6 +499,10 @@ class RetrievalPipeline:
                 inv = build_inventory_digest(episodes, query)
                 if inv:
                     digests["inventory"] = inv
+            elif is_temporal_span_query(query):
+                span = build_temporal_span_digest(episodes, query)
+                if span:
+                    digests["temporal_span"] = span
             elif is_activity_duration_query(query):
                 act = build_activity_duration_digest(episodes, query)
                 if act:
