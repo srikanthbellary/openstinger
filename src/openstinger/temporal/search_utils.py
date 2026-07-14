@@ -1363,6 +1363,33 @@ _PURCHASE_TITLE_RE = re.compile(
     re.I,
 )
 _QUOTED_TITLE_RE = re.compile(r"[\"'“]([^\"'”]{2,60})[\"'”]")
+_TITLE_NOISE_RE = re.compile(
+    r"\b(?:sure|you|looking|suggestions?|festival|weekend|show|after|"
+    r"the|and|for|with|from|this|that|have|got|my)\b",
+    re.I,
+)
+
+
+def _is_clean_purchase_title(title: str) -> bool:
+    """Reject chat fragments mistaken for album/kit titles."""
+    t = (title or "").strip()
+    if len(t) < 3 or len(t) > 60:
+        return False
+    words = t.split()
+    if not words or len(words) > 8:
+        return False
+    if not re.search(r"[A-Za-z]", t):
+        return False
+    # Allow "X vinyl" artist labels; otherwise require a proper-looking title
+    if re.search(r"\bvinyl\b", t, re.I):
+        return bool(re.search(r"[A-Z]", t))
+    noise_hits = len(_TITLE_NOISE_RE.findall(t))
+    if noise_hits >= max(1, len(words) - 1):
+        return False
+    # Prefer titles with a capital or digits (scale models / branded names)
+    if not re.search(r"[A-Z0-9]", t):
+        return False
+    return True
 
 
 def build_topic_inventory_digest(hits: list[dict], query: str = "") -> str:
@@ -1409,14 +1436,15 @@ def build_topic_inventory_digest(hits: list[dict], query: str = "") -> str:
             )
             if quoted:
                 for qt in quoted:
-                    key = qt.strip().lower()
-                    if key and key not in seen_titles:
+                    qt = qt.strip()
+                    key = qt.lower()
+                    if key and key not in seen_titles and _is_clean_purchase_title(qt):
                         seen_titles.add(key)
-                        title_hints.append(qt.strip())
+                        title_hints.append(qt)
                         session_had_quoted = True
             else:
                 # Keep short purchase spans only (avoid long assistant chatter)
-                if len(span) > 80:
+                if len(span) > 80 or not _is_clean_purchase_title(span):
                     continue
                 key = span.lower()[:80]
                 if key and key not in seen_titles:
@@ -1428,11 +1456,12 @@ def build_topic_inventory_digest(hits: list[dict], query: str = "") -> str:
                 r"\b([A-Z][\w']+(?:\s+[A-Z][\w']+){0,3})\s+vinyl\b",
                 content,
             )
-            label = f"{am.group(1)} vinyl" if am else "purchased vinyl"
-            key = label.lower()
-            if key not in seen_titles:
-                seen_titles.add(key)
-                title_hints.append(label)
+            if am:
+                label = f"{am.group(1)} vinyl"
+                key = label.lower()
+                if key not in seen_titles and _is_clean_purchase_title(label):
+                    seen_titles.add(key)
+                    title_hints.append(label)
         if n >= 8:
             break
     if n == 0:
