@@ -434,6 +434,7 @@ class OpenStingerServer:
             agent_namespace=cfg.agent_namespace,
             retrieval_config=cfg.retrieval,
             extract_statements=cfg.ingestion.extract_statements,
+            typed_min_chars=cfg.ingestion.typed_min_chars,
         )
 
         deduplicator = DeduplicationEngine(

@@ -122,11 +122,21 @@ def test_episode_cues_bridge_store_and_coupon():
 
 
 def test_inventory_digest_for_count_queries():
-    from openstinger.temporal.search_utils import build_inventory_digest
+    from openstinger.temporal.search_utils import build_inventory_digest, is_errand_count_query
+
+    assert is_errand_count_query("How many clothing items do I need to pick up?")
+    assert not is_errand_count_query("How many model kits have I worked on or bought?")
+
     hits = [
         {
             "source_description": "s1",
-            "cues": {"actions": ["returned boots to Zara", "picked up exchanged boots"]},
+            "cues": {
+                "actions": [
+                    "returned boots to Zara",
+                    "exchanged them for a larger size",
+                    "pick up the new pair at Zara",
+                ]
+            },
             "content": "x",
         },
         {
@@ -136,9 +146,37 @@ def test_inventory_digest_for_count_queries():
         },
     ]
     dig = build_inventory_digest(hits, "How many clothing items do I need to pick up?")
-    assert "RETURN" in dig and "PICKUP" in dig
-    assert "Errand rows listed: 3" in dig
+    # boots return/pickup stay separate from each other and from drycleaning
+    assert dig.count("- [") >= 2
+    assert "boots" in dig.lower()
+    assert "drycleaning" in dig.lower() or "PICKUP" in dig
+    assert "EACH tagged line" not in dig
+    assert "Distinct items listed:" not in dig
+    assert "Suggested outstanding obligations listed:" in dig
     assert "s1" in dig and "s2" in dig
+
+    # Purchase-history counts should not emit an errand digest
+    assert build_inventory_digest(hits, "How many model kits have I worked on or bought?") == ""
+
+
+def test_inventory_digest_skips_policy_noise():
+    from openstinger.temporal.search_utils import build_inventory_digest
+
+    hits = [
+        {
+            "source_description": "noise",
+            "cues": {
+                "actions": [
+                    "return policy for this product?",
+                    "exchange rates, and commodity prices",
+                ]
+            },
+            "content": "Best Buy return policy FAQ",
+        }
+    ]
+    assert build_inventory_digest(
+        hits, "How many items do I need to return from a store?"
+    ) == ""
 
 
 def test_expertise_digest_scopes_recommend():
@@ -181,3 +219,84 @@ def test_smart_excerpt_keeps_query_terms():
     out = smart_episode_excerpt(body, "Where did I redeem a $5 coupon on coffee creamer?", max_chars=2000)
     assert "Target" in out
     assert "coupon" in out.lower() or "creamer" in out.lower()
+
+
+def test_query_noun_and_preference_context_boost():
+    from openstinger.temporal.search_utils import (
+        apply_preference_context_boost,
+        apply_query_noun_boost,
+        extract_topic_nouns,
+        is_preference_context_query,
+    )
+
+    assert "kits" in extract_topic_nouns("How many model kits have I worked on or bought?") or "kit" in extract_topic_nouns(
+        "How many model kits have I worked on or bought?"
+    )
+    from openstinger.temporal.search_utils import extract_topic_phrases
+    phrases = extract_topic_phrases("How many model kits have I worked on or bought?")
+    assert any("kit" in p for p in phrases)
+    music_nouns = extract_topic_nouns(
+        "How many music albums or EPs have I purchased or downloaded?"
+    )
+    assert "album" in music_nouns or "albums" in music_nouns
+    assert "ep" in music_nouns or "eps" in music_nouns
+    assert "vinyl" in music_nouns
+    assert is_preference_context_query(
+        "I noticed my bike seems to be performing even better during my Sunday group rides. "
+        "Could there be a reason for this?"
+    )
+    rows = [
+        {"uuid": "kit", "content": "I bought a Tamiya Spitfire kit last month.", "score": 0.05},
+        {"uuid": "noise", "content": "I like pizza on Sundays.", "score": 0.08},
+    ]
+    boosted = apply_query_noun_boost(rows, "How many model kits have I bought?")
+    by_id = {r["uuid"]: r for r in boosted}
+    assert by_id["kit"]["score"] > by_id["noise"]["score"]
+
+    bike_rows = [
+        {
+            "uuid": "maint",
+            "content": "I replaced the bike chain and cassette last week.",
+            "score": 0.05,
+        },
+        {"uuid": "other", "content": "Sunday brunch was great.", "score": 0.2},
+    ]
+    ctx = apply_preference_context_boost(
+        bike_rows,
+        "I noticed my bike seems to be performing better. Could there be a reason?",
+    )
+    by_b = {r["uuid"]: r for r in ctx}
+    assert by_b["maint"]["score"] > by_b["other"]["score"]
+    assert by_b["maint"].get("preference_boost")
+
+
+def test_activity_and_topic_digests():
+    from openstinger.temporal.search_utils import (
+        build_activity_duration_digest,
+        build_topic_inventory_digest,
+        is_activity_duration_query,
+        is_topic_inventory_query,
+    )
+
+    assert is_activity_duration_query("How many hours of jogging and yoga did I do last week?")
+    assert is_topic_inventory_query("How many model kits have I worked on or bought?")
+    act_hits = [
+        {
+            "source_description": "s1",
+            "content": "I did 30 minutes of yoga on Tuesday and a short jog.",
+        }
+    ]
+    ad = build_activity_duration_digest(
+        act_hits, "How many hours of jogging and yoga did I do last week?"
+    )
+    assert "30 minutes" in ad.lower() or "minutes" in ad.lower()
+
+    kit_hits = [
+        {"source_description": "k1", "content": "Started the Revell F-15 Eagle model kit."},
+        {"source_description": "k2", "content": "Bought a Tamiya Spitfire kit at 1/48 scale."},
+    ]
+    td = build_topic_inventory_digest(
+        kit_hits, "How many model kits have I worked on or bought?"
+    )
+    assert "Sessions with topic overlap listed:" in td
+    assert "k1" in td and "k2" in td

@@ -121,12 +121,22 @@ EXTRACT_STATEMENTS_TOOL = {
                     "type": "object",
                     "properties": {
                         "text": {"type": "string"},
+                        "kind": {
+                            "type": "string",
+                            "enum": [
+                                "fact",
+                                "preference",
+                                "expertise",
+                                "errand",
+                                "location_update",
+                            ],
+                        },
                         "valid_from_iso": {
                             "type": "string",
                             "description": "ISO date or null",
                         },
                     },
-                    "required": ["text"],
+                    "required": ["text", "kind"],
                 },
             }
         },
@@ -161,6 +171,7 @@ class TemporalEngine:
         agent_namespace: str = "default",
         retrieval_config: RetrievalConfig | None = None,
         extract_statements: bool = True,
+        typed_min_chars: int = 80,
     ) -> None:
         self.driver = driver
         self.llm = llm
@@ -169,6 +180,7 @@ class TemporalEngine:
         self.agent_namespace = agent_namespace
         self.retrieval_config = retrieval_config or RetrievalConfig()
         self.extract_statements = extract_statements
+        self.typed_min_chars = int(typed_min_chars)
         self._pipeline: RetrievalPipeline | None = None
 
         # Lazy import to avoid circular
@@ -341,7 +353,7 @@ class TemporalEngine:
         episode.edge_count = len(raw_edges)
 
         # Step 9: Distill atomic statements (v0.10 wave 2)
-        if self.extract_statements and len((content or "").strip()) >= 80:
+        if self.extract_statements and len((content or "").strip()) >= self.typed_min_chars:
             try:
                 n_stmt = await self._distill_and_persist_statements(episode)
                 logger.debug("Statements distilled: %d", n_stmt)
@@ -471,69 +483,97 @@ class TemporalEngine:
         except Exception as exc:
             logger.warning("Statement LLM extract failed: %s", exc)
             return 0
-        statements = result.get("statements") or []
-        if not statements:
+        raw_statements = result.get("statements") or []
+        if not raw_statements:
             return 0
-        texts = [s.get("text", "").strip() for s in statements if s.get("text")]
-        texts = [t for t in texts if t][:12]
-        if not texts:
+        allowed_kinds = {
+            "fact",
+            "preference",
+            "expertise",
+            "errand",
+            "location_update",
+        }
+        prepared: list[tuple[str, str, int]] = []
+        for s in raw_statements:
+            text = (s.get("text") or "").strip()
+            if not text:
+                continue
+            kind = (s.get("kind") or "fact").strip().lower()
+            if kind not in allowed_kinds:
+                kind = "fact"
+            valid_at = episode.valid_at
+            iso = s.get("valid_from_iso")
+            if iso:
+                try:
+                    valid_at = int(
+                        datetime.fromisoformat(str(iso).replace("Z", "+00:00")).timestamp()
+                    )
+                except Exception:
+                    pass
+            prepared.append((text, kind, valid_at))
+            if len(prepared) >= 12:
+                break
+        if not prepared:
             return 0
+        texts = [t for t, _, _ in prepared]
         try:
             embeddings = await self.embedder.embed_batch(texts)
         except Exception as exc:
             logger.warning("Statement embed failed: %s", exc)
             embeddings = [None] * len(texts)
         n = 0
-        for text, emb in zip(texts, embeddings):
+        for (text, kind, valid_at), emb in zip(prepared, embeddings):
             sid = str(uuid_lib.uuid4())
+            props = {
+                "uuid": sid,
+                "text": text,
+                "kind": kind,
+                "valid_at": valid_at,
+                "namespace": episode.agent_namespace,
+                "source_description": episode.source_description or "",
+                "episode_uuid": episode.uuid,
+                "embedding": emb or [],
+                "ep_uuid": episode.uuid,
+                "link_uuid": str(uuid_lib.uuid4()),
+            }
             try:
                 await self.driver.query_temporal(
                     """
                     CREATE (s:Statement {
                         uuid: $uuid,
                         text: $text,
+                        kind: $kind,
                         valid_at: $valid_at,
-                        agent_namespace: $namespace
+                        agent_namespace: $namespace,
+                        source_description: $source_description,
+                        episode_uuid: $episode_uuid
                     })
                     SET s.text_embedding = vecf32($embedding)
                     WITH s
                     MATCH (ep:Episode {uuid: $ep_uuid})
                     CREATE (ep)-[:DISTILLED_TO {uuid: $link_uuid}]->(s)
                     """,
-                    {
-                        "uuid": sid,
-                        "text": text,
-                        "valid_at": episode.valid_at,
-                        "namespace": episode.agent_namespace,
-                        "embedding": emb or [],
-                        "ep_uuid": episode.uuid,
-                        "link_uuid": str(uuid_lib.uuid4()),
-                    },
+                    props,
                 )
                 n += 1
             except Exception as exc:
-                # Fallback without vector if index missing
                 try:
                     await self.driver.query_temporal(
                         """
                         CREATE (s:Statement {
                             uuid: $uuid,
                             text: $text,
+                            kind: $kind,
                             valid_at: $valid_at,
-                            agent_namespace: $namespace
+                            agent_namespace: $namespace,
+                            source_description: $source_description,
+                            episode_uuid: $episode_uuid
                         })
                         WITH s
                         MATCH (ep:Episode {uuid: $ep_uuid})
                         CREATE (ep)-[:DISTILLED_TO {uuid: $link_uuid}]->(s)
                         """,
-                        {
-                            "uuid": sid,
-                            "text": text,
-                            "valid_at": episode.valid_at,
-                            "namespace": episode.agent_namespace,
-                            "ep_uuid": episode.uuid,
-                            "link_uuid": str(uuid_lib.uuid4()),
-                        },
+                        {k: v for k, v in props.items() if k != "embedding"},
                     )
                     n += 1
                 except Exception as exc2:

@@ -18,8 +18,16 @@ async def test_distill_and_persist_statements_creates_nodes():
     llm.complete_with_tools = AsyncMock(
         return_value={
             "statements": [
-                {"text": "User prefers hotels with rooftop pools.", "valid_from_iso": None},
-                {"text": "User returned boots to Zara.", "valid_from_iso": "2023-01-01"},
+                {
+                    "text": "User prefers hotels with rooftop pools.",
+                    "kind": "preference",
+                    "valid_from_iso": None,
+                },
+                {
+                    "text": "User returned boots to Zara.",
+                    "kind": "errand",
+                    "valid_from_iso": "2023-01-01",
+                },
             ]
         }
     )
@@ -38,13 +46,16 @@ async def test_distill_and_persist_statements_creates_nodes():
     ep = EpisodeNode(
         content="I prefer rooftop pools. I returned boots to Zara.",
         agent_namespace="ns",
+        source_description="session:1",
         valid_at=1_700_000_000,
     )
     n = await eng._distill_and_persist_statements(ep)
     assert n == 2
     assert driver.query_temporal.await_count >= 2
     llm.complete_with_tools.assert_awaited()
-
+    call_params = driver.query_temporal.await_args_list[0].args[1]
+    assert call_params.get("kind") == "preference"
+    assert call_params.get("source_description") == "session:1"
 
 @pytest.mark.asyncio
 async def test_distill_skips_when_llm_returns_empty():

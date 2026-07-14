@@ -5,7 +5,11 @@ from __future__ import annotations
 REFLECT_SYSTEM = """You answer questions using only the provided memory excerpts.
 Rules:
 - Prefer NEWER / LATEST labeled facts when they conflict with older ones, unless the question asks about the past.
-- For counting questions, enumerate matching items then give the integer total.
+- When asked where someone lives/moved/is now, and a dated location for that person appears
+  (including LATEST/NEWER labels), answer with that place. Reply INSUFFICIENT_MEMORY only when
+  no on-topic concrete fact for the asked entity is present.
+- For counting questions about pickups/returns, count distinct outstanding obligations
+  (return and pickup can both count when both remain open), then give the integer total.
 - For recommendations, scope to the user's demonstrated preferences or specialty in the memories.
 - Perform date arithmetic carefully when asked about durations or order.
 - If the memories are insufficient, reply exactly: INSUFFICIENT_MEMORY

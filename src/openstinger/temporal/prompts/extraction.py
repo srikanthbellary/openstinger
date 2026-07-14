@@ -37,7 +37,15 @@ Rules:
 - Do not invent facts not present in the text
 For each statement provide:
 - text: one sentence, subject explicit
+- kind: one of fact | preference | expertise | errand | location_update
 - valid_from_iso: ISO date if known or resolved, else null
+
+Kind guidance (generic product memory, not domain-specific tags):
+- preference: likes, wants, hotel features, recommendation criteria
+- expertise: research focus, professional specialty, demonstrated skill depth
+- errand: pickup, return, exchange, redeem, buy, or similar pending/completed tasks
+- location_update: moved, relocated, current city/home/place for a person
+- fact: everything else that is still worth remembering
 """
 
 

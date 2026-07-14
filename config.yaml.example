@@ -41,6 +41,8 @@ ingestion:
   workspace_dir: null
   poll_interval_seconds: 5
   chunk_size: 10
+  # Optional statement distillation length gate
+  # typed_min_chars: 80
   extract_statements: true
 
 # Deduplication thresholds (Tier 1)
@@ -84,6 +86,7 @@ retrieval:
   candidate_cap: 60
   experimental_lexicons: false        # keep false for publishable fair scores
   abstain_threshold: 0.15
-  reranker: none                      # none | llm | cross_encoder
+  # Fair-default freeze: keep none until flagged retain/rerank beats gate mean twice.
+  reranker: none                      # none | llm | cross_encoder (opt-in only)
   rerank_top_n: 30
   keep_digests: true

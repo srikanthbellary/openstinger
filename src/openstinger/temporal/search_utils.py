@@ -97,6 +97,161 @@ def is_count_query(query: str) -> bool:
     return bool(_COUNT_RE.search(query or ""))
 
 
+_ERRAND_COUNT_HINT_RE = re.compile(
+    r"\b(?:pick(?:ed)?\s*up|return(?:ed|ing)?|exchang(?:e|ed|ing)|"
+    r"redeem(?:ed)?|dry[- ]?clean|from\s+(?:a\s+)?store|to\s+(?:a\s+)?store|"
+    r"drop(?:ped)?\s*off)\b",
+    re.I,
+)
+
+
+def is_errand_count_query(query: str) -> bool:
+    """
+    Count questions about pending errands (pickup / return / exchange / redeem).
+
+    Inventory history counts ("how many kits did I buy/work on") are excluded so
+    digests do not inject unrelated return-policy noise into the answer context.
+    """
+    return is_count_query(query) and bool(_ERRAND_COUNT_HINT_RE.search(query or ""))
+
+
+_TOPIC_STOP = _STOP | _PHRASE_STOP | {
+    "need", "needs", "items", "item", "many", "much", "week", "weeks",
+    "hours", "hour", "recent", "recently", "upcoming", "might", "find",
+    "interesting", "reason", "reasons", "seems", "better", "during",
+    "group", "rides", "noticed", "performing", "could", "there",
+    "publications", "publication", "conferences", "conference",
+    "recommend", "suggest", "suggestion", "please", "thank",
+    # Action / location shells that match haystack noise too easily
+    "pick", "pickup", "return", "returned", "returning", "exchange",
+    "exchanged", "exchanging", "store", "stores", "bought", "buy",
+    "worked", "work", "purchased", "purchase", "downloaded", "download",
+}
+
+_ACTIVITY_RE = re.compile(
+    r"\b(?:jog(?:ging)?|yoga|run(?:ning)?|walk(?:ing)?|gym|workout|exercise|"
+    r"swim(?:ming)?|cycl(?:e|ing)|hike|hiking)\b",
+    re.I,
+)
+_DURATION_HINT_RE = re.compile(
+    r"\b(?:hours?|hrs?|minutes?|mins?|long|duration|time)\b",
+    re.I,
+)
+_DURATION_SPAN_RE = re.compile(
+    r"(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|minutes?|mins?)",
+    re.I,
+)
+_MAINT_CUE_RE = re.compile(
+    r"\b(?:replac(?:e|ed|ing)|install(?:ed|ing)?|upgrad(?:e|ed|ing)|"
+    r"maintenance|repair(?:ed|ing)?|serviced|tuned)\b",
+    re.I,
+)
+
+
+_AMBIGUOUS_TOPIC_NOUNS = {
+    "model", "models", "scale", "scales", "set", "sets", "system", "systems",
+    "data", "paper", "papers", "group", "type", "types",
+}
+
+
+def extract_topic_nouns(query: str, *, max_n: int = 8) -> list[str]:
+    """Content nouns from the question for CONTAINS / boost (no proper-name bias)."""
+    tokens = re.findall(r"[A-Za-z0-9]+", (query or "").lower())
+    out: list[str] = []
+    seen: set[str] = set()
+    for t in tokens:
+        # Allow short media tokens (EP) when asked explicitly
+        if t in {"ep", "eps"}:
+            variants = ["ep", "eps"]
+        elif len(t) < 3 or t in _TOPIC_STOP or t in _AMBIGUOUS_TOPIC_NOUNS:
+            continue
+        else:
+            variants = [t]
+            if t.endswith("s") and len(t) > 3 and t[:-1] not in _TOPIC_STOP:
+                variants.append(t[:-1])
+        for v in variants:
+            if v in seen or v in _AMBIGUOUS_TOPIC_NOUNS:
+                continue
+            seen.add(v)
+            out.append(v)
+            if len(out) >= max_n:
+                break
+        if len(out) >= max_n:
+            break
+    # Music inventory: vinyl often pairs with album/EP purchases
+    if any(x in seen for x in ("album", "albums", "ep", "eps")):
+        for v in ("album", "albums", "ep", "eps", "vinyl"):
+            if v not in seen and len(out) < max_n + 3:
+                seen.add(v)
+                out.append(v)
+    return out
+
+
+def extract_topic_phrases(query: str, *, max_n: int = 10) -> list[str]:
+    """Significant bigrams (e.g. model kits) for CONTAINS / boost."""
+    tokens = re.findall(r"[A-Za-z0-9]+", (query or "").lower())
+    keep = [t for t in tokens if len(t) > 2 and t not in _TOPIC_STOP]
+    out: list[str] = []
+    seen: set[str] = set()
+    for i in range(len(keep) - 1):
+        phrase = f"{keep[i]} {keep[i + 1]}"
+        # Allow ambiguous first token when paired (model kits)
+        if phrase in seen:
+            continue
+        seen.add(phrase)
+        out.append(phrase)
+        # Singularize trailing s for matching "model kit"
+        if keep[i + 1].endswith("s") and len(keep[i + 1]) > 3:
+            sing = f"{keep[i]} {keep[i + 1][:-1]}"
+            if sing not in seen:
+                seen.add(sing)
+                out.append(sing)
+        # Scale-model inventory: "model kit(s)" often co-occurs with
+        # "model tank(s)" / "model building" in the same hobby thread.
+        if keep[i + 1] in {"kit", "kits"}:
+            for tail in ("tank", "tanks", "building"):
+                alt = f"{keep[i]} {tail}"
+                if alt not in seen:
+                    seen.add(alt)
+                    out.append(alt)
+        if len(out) >= max_n:
+            break
+    return out[: max(max_n, len(out))]
+
+
+def is_preference_context_query(query: str) -> bool:
+    """
+    Follow-ups that need prior preference or maintenance facts without recommend verbs.
+    """
+    if is_recommend_query(query):
+        return False
+    ql = (query or "").lower()
+    if re.search(
+        r"\b(?:why|reason|noticed|seems|could there|performing|improved|"
+        r"improvement|better during|any reason)\b",
+        ql,
+    ):
+        return True
+    return False
+
+
+def is_activity_duration_query(query: str) -> bool:
+    return (
+        is_count_query(query)
+        and bool(_ACTIVITY_RE.search(query or ""))
+        and bool(_DURATION_HINT_RE.search(query or ""))
+    )
+
+
+def is_topic_inventory_query(query: str) -> bool:
+    """Non-errand, non-duration count questions (kits, albums, purchases)."""
+    return (
+        is_count_query(query)
+        and not is_errand_count_query(query)
+        and not is_activity_duration_query(query)
+    )
+
+
 def content_has_preference_cues(content: str) -> bool:
     return bool(_PREF_CUE_RE.search(content or ""))
 
@@ -333,17 +488,140 @@ def score_domain_depth(content: str) -> tuple[str | None, float]:
 
 def classify_errand_action(action: str) -> str:
     al = (action or "").lower()
-    if "return" in al:
+    if re.search(r"\breturn(?:ed|ing)?\b", al) and "policy" not in al:
         return "RETURN"
-    if "exchange" in al or "exchanged" in al:
+    if re.search(r"\bexchang(?:e|ed|ing)\b", al) and "rate" not in al:
         return "EXCHANGE"
-    if "redeem" in al or "coupon" in al:
+    if re.search(r"\bredeem(?:ed)?\b", al) or "coupon" in al:
         return "REDEEM"
-    if "dry clean" in al or "pick" in al:
+    if re.search(r"\bpick(?:ed)?\s*up\b", al):
         return "PICKUP"
-    if "bought" in al or "purchased" in al or "ordered" in al:
+    if re.search(r"\bdry[- ]?clean", al) and re.search(r"\bpick", al):
+        return "PICKUP"
+    if re.search(r"\b(?:bought|purchased|ordered)\b", al):
         return "BUY"
     return "ACTION"
+
+
+_ERRAND_NOISE_RE = re.compile(
+    r"(?:return\s+policy|exchange\s+rates?|commodity\s+prices|"
+    r"while\s+others\s+can\s+be|machine\s+washed|"
+    r"exchange\s+or\s+the|shipping\s+options|"
+    r"designated\s+spot|folder\s+or\s+envelope|to-do\s+list|"
+    r"well-deserved|decluttering|don'?t\s+forget|"
+    r"pick\s+up\s+or\s+return|perfect\s+excuse|"
+    r"dry\s+clean\s+only)",
+    re.I,
+)
+_ITEM_KEY_STOP = {
+    "the", "a", "an", "my", "some", "old", "new", "pair", "ones", "it", "them",
+    "this", "that", "from", "to", "at", "for", "and", "or", "you", "should",
+    "able", "store", "size", "time", "policies", "policy", "confirm", "enough",
+    "larger", "still", "need", "also", "actually", "while", "others", "can",
+    "be", "have", "your", "with", "into", "about", "item", "items", "soon",
+    "reminder", "list", "break", "come", "back", "always", "quite", "right",
+    "any", "fit", "got", "february", "meeting", "weeks", "ago", "wore",
+    "not", "dont", "does", "did", "will", "might", "want", "add",
+}
+_ITEM_KEY_STOP |= {tok for name in _STORE_NAMES for tok in name.lower().split()}
+
+
+def _is_noise_errand_span(action: str) -> bool:
+    al = (action or "").lower().strip()
+    if not al or not _ERRAND_VERB_RE.search(al):
+        return True
+    if _ERRAND_NOISE_RE.search(al):
+        return True
+    if "policy" in al or "policies" in al:
+        return True
+    if len(re.findall(r"[a-z]{3,}", al)) <= 2:
+        return True
+    if re.search(r"\bdry[- ]?clean", al) and not re.search(r"\bpick", al):
+        return True
+    return False
+
+
+def _errand_item_key(action: str) -> str:
+    """Normalize an action span to a stable item key for clustering."""
+    al = (action or "").lower()
+    if re.search(r"\bdry[- ]?clean", al) and re.search(r"\bpick", al):
+        return "drycleaning"
+    al = _ERRAND_VERB_RE.sub(" ", al)
+    al = re.sub(r"\b(?:pair\s+of|some|the|a|an|my|old|new)\b", " ", al)
+    tokens = [
+        t for t in re.findall(r"[a-z]{3,}", al)
+        if t not in _ITEM_KEY_STOP
+    ]
+    if not tokens:
+        return "unknown"
+    return " ".join(tokens[:2])
+
+
+def _item_keys_compatible(a: str, b: str) -> bool:
+    if a == "unknown" or b == "unknown":
+        return True
+    if a == b:
+        return True
+    return bool(set(a.split()) & set(b.split()))
+
+
+def _merge_cluster_maps(
+    clusters: dict[str, dict[str, Any]],
+    order: list[str],
+) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    """
+    Merge duplicate mentions of the same action on the same item.
+
+    Return and pickup stay separate (exchange workflows often need both).
+    """
+    ids = [cid for cid in order if cid in clusters]
+    parent = {cid: cid for cid in ids}
+
+    def find(x: str) -> str:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for i, a in enumerate(ids):
+        for b in ids[i + 1 :]:
+            ca, cb = clusters[a], clusters[b]
+            # Only merge when action tag sets overlap (same errand kind)
+            if not (ca["tags"] & cb["tags"]):
+                continue
+            if not _item_keys_compatible(ca["item"], cb["item"]):
+                continue
+            ra, rb = find(a), find(b)
+            if ra == rb:
+                continue
+            ka, kb = clusters[ra]["item"], clusters[rb]["item"]
+            if kb == "unknown" or (ka != "unknown" and len(ka) >= len(kb)):
+                parent[rb] = ra
+            else:
+                parent[ra] = rb
+
+    merged: dict[str, dict[str, Any]] = {}
+    new_order: list[str] = []
+    for cid in ids:
+        root = find(cid)
+        if root not in merged:
+            merged[root] = {
+                "tags": set(clusters[cid]["tags"]),
+                "sample": clusters[cid]["sample"],
+                "sid": clusters[cid]["sid"],
+                "item": clusters[cid]["item"],
+            }
+            new_order.append(root)
+            continue
+        merged[root]["tags"] |= clusters[cid]["tags"]
+        if merged[root]["item"] == "unknown" or (
+            clusters[cid]["item"] != "unknown"
+            and len(clusters[cid]["item"]) > len(merged[root]["item"])
+        ):
+            merged[root]["item"] = clusters[cid]["item"]
+            merged[root]["sample"] = clusters[cid]["sample"]
+            merged[root]["sid"] = clusters[cid]["sid"]
+    return merged, new_order
 
 
 def apply_preference_boost(episodes: list[dict], query: str) -> list[dict]:
@@ -378,7 +656,11 @@ def apply_preference_boost(episodes: list[dict], query: str) -> list[dict]:
             if domain:
                 r["expertise_domain"] = domain
                 r["expertise_depth"] = depth
-            if venue_hit and depth < 2.0:
+            sop_noise = bool(_SOP_NOISE_RE.search(content))
+            if venue_hit and sop_noise and depth < 2.0:
+                # Admissions / SoP venue name-drops should not outrank specialty
+                pass
+            elif venue_hit and depth < 2.0:
                 # Light bump only: bare venue lists should not dominate
                 score = min(1.0, score + 0.08)
                 r["preference_boost"] = True
@@ -390,7 +672,7 @@ def apply_preference_boost(episodes: list[dict], query: str) -> list[dict]:
                 score = min(1.0, score + min(0.45, 0.12 * depth))
                 r["preference_boost"] = True
                 r["expertise_boost"] = True
-            if _EXPERTISE_MARKER_RE.search(content):
+            if _EXPERTISE_MARKER_RE.search(content) and not sop_noise:
                 score = min(1.0, score + 0.15)
                 r["preference_boost"] = True
         r["score"] = round(score, 4)
@@ -403,10 +685,10 @@ def apply_errand_boost(episodes: list[dict], query: str) -> list[dict]:
     ql = (query or "").lower()
     if not (
         is_count_query(query)
-        or any(w in ql for w in ("pick up", "return", "clothing", "exchange"))
+        or any(w in ql for w in ("pick up", "return", "clothing", "exchange", "store"))
     ):
         return episodes
-    clothing_q = any(w in ql for w in ("clothing", "clothes", "apparel"))
+    topic = extract_topic_nouns(query)
     out: list[dict] = []
     for row in episodes:
         r = dict(row)
@@ -414,10 +696,19 @@ def apply_errand_boost(episodes: list[dict], query: str) -> list[dict]:
         cl = content.lower()
         score = float(r.get("score") or 0)
         n_errands = len(_ERRAND_VERB_RE.findall(content))
-        strong = any(
-            w in cl for w in ("dry clean", "zara", "blazer", "boots", "picked up", "returned")
+        dry = bool(re.search(r"\bdry[- ]?clean", cl))
+        strong = bool(
+            dry or re.search(r"\b(?:picked up|returned|exchanged)\b", cl)
         )
-        if clothing_q and not strong and n_errands == 0:
+        topic_hit = bool(topic) and any(t in cl for t in topic)
+        # Apparel / object words often absent; treat dry-clean as on-topic for clothing qs
+        clothing_q = any(w in ql for w in ("clothing", "clothes", "apparel"))
+        on_topic = topic_hit or (clothing_q and dry) or (
+            clothing_q and bool(re.search(
+                r"\b(?:boots?|blazer|dress|shirt|pants|jacket|coat|shoes?)\b", cl
+            ))
+        )
+        if not on_topic or not (strong or n_errands):
             out.append(r)
             continue
         if n_errands:
@@ -426,6 +717,58 @@ def apply_errand_boost(episodes: list[dict], query: str) -> list[dict]:
         if strong:
             score = min(1.0, score + 0.2)
             r["errand_boost"] = True
+        r["score"] = round(score, 4)
+        out.append(r)
+    return out
+
+
+def apply_query_noun_boost(episodes: list[dict], query: str) -> list[dict]:
+    """Surface episodes that mention question nouns/phrases (kits, bike, albums, …)."""
+    # Errand counts are handled by digests; noun boost there pulls noise.
+    if is_errand_count_query(query):
+        return episodes
+    phrases = extract_topic_phrases(query)
+    nouns = extract_topic_nouns(query)
+    if (not phrases and not nouns) or not episodes:
+        return episodes
+    out: list[dict] = []
+    for row in episodes:
+        r = dict(row)
+        cl = (r.get("content") or "").lower()
+        phrase_hits = sum(1 for p in phrases if p in cl)
+        noun_hits = sum(1 for n in nouns if n in cl)
+        if phrase_hits or noun_hits:
+            score = float(r.get("score") or 0)
+            score = min(1.0, score + 0.18 * min(phrase_hits, 2) + 0.1 * min(noun_hits, 3))
+            r["score"] = round(score, 4)
+            r["noun_boost"] = True
+        out.append(r)
+    return out
+
+
+def apply_preference_context_boost(episodes: list[dict], query: str) -> list[dict]:
+    """
+    Non-recommend preference follow-ups: boost topic-overlap + maintenance cues.
+    """
+    if not is_preference_context_query(query) or not episodes:
+        return episodes
+    nouns = extract_topic_nouns(query)
+    out: list[dict] = []
+    for row in episodes:
+        r = dict(row)
+        content = r.get("content") or ""
+        cl = content.lower()
+        score = float(r.get("score") or 0)
+        noun_hit = bool(nouns) and any(n in cl for n in nouns)
+        if noun_hit and (_MAINT_CUE_RE.search(content) or content_has_preference_cues(content)):
+            score = min(1.0, score + 0.22)
+            r["preference_boost"] = True
+        elif noun_hit:
+            score = min(1.0, score + 0.12)
+            r["preference_boost"] = True
+        elif content_has_preference_cues(content):
+            score = min(1.0, score + 0.1)
+            r["preference_boost"] = True
         r["score"] = round(score, 4)
         out.append(r)
     return out
@@ -671,15 +1014,74 @@ def force_include_focus_episodes(
     return list(by_uuid.values())
 
 
+def force_include_topic_episodes(
+    candidates: list[dict],
+    query: str,
+    limit: int,
+) -> list[dict]:
+    """
+    Keep phrase-matching inventory sessions in the pool (e.g. model kit talks)
+    even when generic keyword noise ranked higher in RRF.
+    """
+    if not is_topic_inventory_query(query) and not is_preference_context_query(query):
+        if not is_activity_duration_query(query):
+            return candidates
+    phrases = extract_topic_phrases(query)
+    nouns = extract_topic_nouns(query)
+    if not phrases and not nouns:
+        return candidates
+
+    scored: list[tuple[float, dict]] = []
+    for row in candidates:
+        content = row.get("content") or ""
+        cl = content.lower()
+        phrase_hits = sum(1 for p in phrases if p in cl)
+        noun_hits = sum(1 for n in nouns if n in cl)
+        if phrase_hits == 0 and noun_hits == 0:
+            continue
+        strength = float(phrase_hits) * 2.0 + float(noun_hits)
+        for p in phrases:
+            if p in cl and re.search(
+                r"\b(?:my|i(?:'ve| have)?)\b.{0,60}" + re.escape(p), cl
+            ):
+                strength += 1.5
+                break
+        scored.append((strength, row))
+    if not scored:
+        return candidates
+    scored.sort(key=lambda x: x[0], reverse=True)
+    by_uuid = {r.get("uuid"): r for r in candidates if r.get("uuid")}
+    for strength, row in scored[: max(4, min(8, limit))]:
+        uid = row.get("uuid")
+        if not uid:
+            continue
+        bump = 0.95 if strength >= 3 else (0.9 if strength >= 2 else 0.82)
+        if uid in by_uuid:
+            # Absolute bump: positional/noop scores must not dominate topic hits
+            by_uuid[uid]["score"] = bump
+            by_uuid[uid]["fusion_score"] = bump
+            by_uuid[uid]["topic_forced"] = True
+            by_uuid[uid]["noun_boost"] = True
+        else:
+            forced = dict(row)
+            forced["score"] = bump
+            forced["fusion_score"] = bump
+            forced["topic_forced"] = True
+            forced["noun_boost"] = True
+            forced["result_type"] = "episode"
+            by_uuid[uid] = forced
+    return list(by_uuid.values())
+
+
 def effective_search_limit(query: str, limit: int) -> int:
-    """Recommend / count questions benefit from a slightly wider candidate pool."""
+    """Recommend / count / preference-context questions benefit from a wider pool."""
     base = max(limit, 1)
     q = (query or "").lower()
     if is_recommend_query(query) and any(
         w in q for w in ("publication", "conference", "paper", "journal", "interesting")
     ):
         return max(base, 16)
-    if is_recommend_query(query) or is_count_query(query):
+    if is_recommend_query(query) or is_count_query(query) or is_preference_context_query(query):
         return max(base, 12)
     return base
 
@@ -777,21 +1179,19 @@ def order_hits_for_answer(hits: list[dict]) -> list[dict]:
 
 def build_inventory_digest(hits: list[dict], query: str = "") -> str:
     """
-    For count questions: enumerate every errand action as its own countable row.
+    For errand-style count questions: list distinct items (clustered), not every span.
 
-    Return vs pickup vs exchange of related items are separate counts (product-general
-    multi-session errand aggregation).
+    Same product/store mentioned as return + pickup + exchange collapses to one item.
+    Non-errand counts (purchase history, how many kits worked on) skip this digest.
     """
-    if not is_count_query(query) or not hits:
+    if not is_errand_count_query(query) or not hits:
         return ""
-    ql = (query or "").lower()
-    clothing_q = any(w in ql for w in ("clothing", "clothes", "apparel", "garment"))
-    lines = [
-        "Countable errands (count EACH tagged line separately; "
-        "RETURN and PICKUP are separate even for the same product/store):"
-    ]
-    seen_row: set[str] = set()
-    n = 0
+
+    # cluster_key -> {tags, sample, sid}
+    clusters: dict[str, dict[str, Any]] = {}
+    last_key_by_sid: dict[str, str] = {}
+    order: list[str] = []
+
     for h in hits:
         sid = (h.get("source_description") or h.get("uuid") or "").strip() or "?"
         cues = h.get("cues") or {}
@@ -803,40 +1203,221 @@ def build_inventory_digest(hits: list[dict], query: str = "") -> str:
                 if span and span not in actions:
                     actions.append(span[:120])
         for a in actions:
-            al = a.lower()
+            if _is_noise_errand_span(a):
+                continue
             tag = classify_errand_action(a)
-            if clothing_q:
-                # Clothing counts: only pickup/return/exchange/dry-clean style errands
-                if tag not in {"RETURN", "PICKUP", "EXCHANGE"} and "dry clean" not in al:
+            if tag == "EXCHANGE":
+                # Outstanding work is usually return old and/or pick up new
+                al = a.lower()
+                if re.search(r"\bpick", al):
+                    tag = "PICKUP"
+                elif re.search(r"\breturn", al):
+                    tag = "RETURN"
+                else:
                     continue
-                if not any(
-                    w in al
-                    for w in (
-                        "boot", "blazer", "shirt", "dress", "jacket", "pant",
-                        "cloth", "zara", "clean", "return", "pick", "exchange",
-                    )
+            if tag not in {"RETURN", "PICKUP", "REDEEM"}:
+                continue
+            item_key = _errand_item_key(a)
+            prev = last_key_by_sid.get(f"{sid}|{tag}")
+            if item_key == "unknown" and not prev:
+                continue
+            if prev and _item_keys_compatible(item_key, prev):
+                if item_key == "unknown" or (
+                    prev != "unknown" and len(prev) >= len(item_key)
                 ):
-                    continue
-            elif not _ERRAND_VERB_RE.search(a) and not any(
-                w in al for w in ("boot", "blazer", "clothing", "zara", "clean")
-            ):
-                continue
-            key = f"{sid}|{al[:80]}"
-            if key in seen_row:
-                continue
-            seen_row.add(key)
+                    item_key = prev
+                last_key_by_sid[f"{sid}|{tag}"] = item_key
+            elif item_key != "unknown":
+                last_key_by_sid[f"{sid}|{tag}"] = item_key
+
+            if prev and prev != item_key and _item_keys_compatible(prev, item_key):
+                old_id = f"{sid}|{tag}|{prev}"
+                new_id = f"{sid}|{tag}|{item_key}"
+                if old_id in clusters and old_id != new_id:
+                    old = clusters.pop(old_id)
+                    if new_id in clusters:
+                        clusters[new_id]["tags"] |= old["tags"]
+                    else:
+                        old["item"] = item_key
+                        clusters[new_id] = old
+                        order[order.index(old_id)] = new_id
+
+            cluster_id = f"{sid}|{tag}|{item_key}"
             snippet = re.sub(r"^\[(Session cues|LATEST update)[^\]]*\]\s*", "", a)
+            if cluster_id not in clusters:
+                clusters[cluster_id] = {
+                    "tags": {tag},
+                    "sample": snippet[:160],
+                    "sid": sid,
+                    "item": item_key,
+                }
+                order.append(cluster_id)
+            else:
+                clusters[cluster_id]["tags"].add(tag)
+
+    seen_order: list[str] = []
+    for cid in order:
+        if cid in clusters and cid not in seen_order:
+            seen_order.append(cid)
+    clusters, order = _merge_cluster_maps(clusters, seen_order)
+
+    if not order:
+        return ""
+
+    lines = [
+        "Candidate errand obligations inferred from memory "
+        "(duplicate mentions of the same action on the same item collapse; "
+        "return vs pickup stay separate):",
+    ]
+    for cid in order[:8]:
+        c = clusters[cid]
+        tags = "/".join(sorted(c["tags"]))
+        item = c["item"] if c["item"] != "unknown" else "item"
+        lines.append(f"- [{tags}] ({c['sid']}) {item}: {c['sample']}")
+    n = min(len(order), 8)
+    lines.append(f"Suggested outstanding obligations listed: {n}.")
+    lines.append(
+        "Default to this count when each bullet is a distinct open pickup/return that matches "
+        "the question. Only drop a bullet if the excerpts clearly show that obligation was already "
+        "completed or is unrelated. RETURN and PICKUP of the same product can both remain open. "
+        "Verify against the session excerpts."
+    )
+    return "\n".join(lines)
+
+
+def build_activity_duration_digest(hits: list[dict], query: str = "") -> str:
+    """List duration mentions for jogging/yoga/workout style hour questions."""
+    if not is_activity_duration_query(query) or not hits:
+        return ""
+    q_acts = sorted({m.group(0).lower() for m in _ACTIVITY_RE.finditer(query or "")})
+    lines = [
+        "Activity duration mentions found in memory "
+        "(sum matching activities for the asked window; convert minutes to hours):",
+    ]
+    n = 0
+    total_hours = 0.0
+    for h in hits:
+        content = h.get("content") or ""
+        cl = content.lower()
+        if q_acts and not any(a in cl for a in q_acts):
+            if not any(a[:3] in cl for a in q_acts if len(a) >= 3):
+                continue
+        when = h.get("valid_at_human") or ""
+        sid = h.get("source_description") or h.get("uuid") or "?"
+        for m in _DURATION_SPAN_RE.finditer(content):
+            start = max(0, m.start() - 50)
+            end = min(len(content), m.end() + 50)
+            snippet = re.sub(r"\s+", " ", content[start:end]).strip()
+            amount = float(m.group(1))
+            unit = m.group(0).lower()
+            hours = amount / 60.0 if "min" in unit else amount
+            total_hours += hours
+            stamp = f" @{when}" if when else ""
+            lines.append(f"- ({sid}){stamp} ~{hours:g}h from '{m.group(0)}': {snippet}")
             n += 1
-            lines.append(f"- [{tag}] ({sid}): {snippet[:160]}")
             if n >= 8:
                 break
         if n >= 8:
             break
     if n == 0:
+        lines.append(
+            "- (none found in top excerpts) If no matching duration is present for the "
+            "asked activities, answer 0 hours."
+        )
+    else:
+        lines.append(
+            f"Candidate duration sum (raw mentions, before date filter): {total_hours:g} hours. "
+            "Prefer concrete completed workouts (e.g. 'I went for a 30-minute jog') over "
+            "plans or old habits ('I used to'). Convert 30 minutes to 0.5 hours. "
+            "For last-week questions: if the only completed matching workout is dated "
+            "within ~14 days before the question date, count it (answer that duration, "
+            "not 0)."
+        )
+    return "\n".join(lines)
+
+
+_PURCHASE_TITLE_RE = re.compile(
+    r"\b(?:bought|purchased|downloaded|got|signed)\b[^\.\n]{0,100}?"
+    r"(?:album|ep|vinyl|kit|model)\b[^\.\n]{0,80}"
+    r"|"
+    r"\b(?:album|ep|vinyl)\b[^\.\n]{0,40}?\b(?:bought|purchased|downloaded|signed)\b[^\.\n]{0,60}",
+    re.I,
+)
+_QUOTED_TITLE_RE = re.compile(r"[\"'“]([^\"'”]{2,60})[\"'”]")
+
+
+def build_topic_inventory_digest(hits: list[dict], query: str = "") -> str:
+    """
+    For non-errand inventory counts: surface topic-overlapping episode snippets.
+    """
+    if not is_topic_inventory_query(query) or not hits:
         return ""
+    phrases = extract_topic_phrases(query)
+    nouns = extract_topic_nouns(query)
+    if not phrases and not nouns:
+        return ""
+    lines = [
+        "Topic inventory hints from memory (count distinct matching items/projects "
+        "in the excerpts; do not stop at the first session):",
+    ]
+    seen_sid: set[str] = set()
+    n = 0
+    title_hints: list[str] = []
+    seen_titles: set[str] = set()
+    for h in hits:
+        content = h.get("content") or ""
+        cl = content.lower()
+        matched = [p for p in phrases if p in cl] + [noun for noun in nouns if noun in cl]
+        if not matched:
+            continue
+        sid = (h.get("source_description") or h.get("uuid") or "?").strip()
+        if sid in seen_sid:
+            continue
+        seen_sid.add(sid)
+        # Prefer a window around the first match
+        idxs = [cl.find(m) for m in matched if cl.find(m) >= 0]
+        idx = min(idxs) if idxs else 0
+        start = max(0, idx - 50)
+        end = min(len(content), idx + 120)
+        snippet = re.sub(r"\s+", " ", content[start:end]).strip()
+        lines.append(f"- ({sid}) [{', '.join(matched[:3])}] {snippet}")
+        n += 1
+        for m in _PURCHASE_TITLE_RE.finditer(content):
+            span = re.sub(r"\s+", " ", m.group(0)).strip()
+            quoted = _QUOTED_TITLE_RE.findall(span) or _QUOTED_TITLE_RE.findall(
+                content[max(0, m.start() - 40) : m.end() + 40]
+            )
+            if quoted:
+                for qt in quoted:
+                    key = qt.strip().lower()
+                    if key and key not in seen_titles:
+                        seen_titles.add(key)
+                        title_hints.append(qt.strip())
+            else:
+                key = span.lower()[:80]
+                if key and key not in seen_titles:
+                    seen_titles.add(key)
+                    title_hints.append(span[:100])
+        # Vinyl without a quoted title still counts as a distinct music purchase
+        for m in re.finditer(r".{0,50}\bvinyl\b.{0,50}", content, re.I):
+            span = re.sub(r"\s+", " ", m.group(0)).strip()
+            key = span.lower()
+            if key and key not in seen_titles:
+                seen_titles.add(key)
+                title_hints.append(span[:100])
+        if n >= 8:
+            break
+    if n == 0:
+        return ""
+    if title_hints:
+        lines.append(
+            "Candidate titled purchases/downloads (dedupe by title across sessions; "
+            "include signed/purchased vinyl): "
+            + "; ".join(title_hints[:10])
+        )
     lines.append(
-        f"Errand rows listed: {n}. Answer with the total integer and a one-line list. "
-        "Do not merge return+pickup of an exchange into one item."
+        f"Sessions with topic overlap listed: {n}. Enumerate every distinct matching "
+        "item across sessions, then give the total integer together with the item names."
     )
     return "\n".join(lines)
 
@@ -885,6 +1466,48 @@ def build_expertise_digest(hits: list[dict], query: str = "") -> str:
         "Prefer conferences/papers inside the primary focus; "
         "avoid recommending unrelated general topics when memory shows a specialty. "
         "Ignore admissions/SoP essays that only name-drop venues."
+    )
+    return "\n".join(lines)
+
+
+_MAINT_FACT_RE = re.compile(
+    r"[^\.\n]{0,40}\b(?:replac(?:e|ed|ing)|install(?:ed|ing)?|upgrad(?:e|ed|ing)|"
+    r"new\s+(?:\w+\s+){0,3}(?:computer|device|kit|cassette|chain|tires?|battery))"
+    r"[^\.\n]{0,80}",
+    re.I,
+)
+
+
+def build_maintenance_digest(hits: list[dict], query: str = "") -> str:
+    """Surface maintenance/gear facts for preference follow-ups (bike performance, etc.)."""
+    if not is_preference_context_query(query) or not hits:
+        return ""
+    lines = [
+        "Related maintenance / gear facts from memory "
+        "(cite all of these when explaining improved performance):",
+    ]
+    n = 0
+    seen: set[str] = set()
+    for h in hits:
+        content = h.get("content") or ""
+        sid = h.get("source_description") or h.get("uuid") or "?"
+        for m in _MAINT_FACT_RE.finditer(content):
+            span = re.sub(r"\s+", " ", m.group(0)).strip()
+            key = span.lower()
+            if not span or key in seen:
+                continue
+            seen.add(key)
+            lines.append(f"- ({sid}) {span[:160]}")
+            n += 1
+            if n >= 6:
+                break
+        if n >= 6:
+            break
+    if n == 0:
+        return ""
+    lines.append(
+        "When answering why something improved, mention every listed fact that applies "
+        "(for example both replaced parts and a new computer/device)."
     )
     return "\n".join(lines)
 

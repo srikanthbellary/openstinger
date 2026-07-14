@@ -52,6 +52,8 @@ _TEMPORAL_SCHEMA_STATIC = [
     # Statement nodes (v0.10 wave 2 atomic distillation)
     "CREATE INDEX FOR (s:Statement) ON (s.uuid)",
     "CREATE INDEX FOR (s:Statement) ON (s.agent_namespace)",
+    "CREATE INDEX FOR (s:Statement) ON (s.kind)",
+    "CREATE INDEX FOR (s:Statement) ON (s.episode_uuid)",
     "CREATE FULLTEXT INDEX FOR (s:Statement) ON (s.text)",
 ]
 

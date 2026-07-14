@@ -7,6 +7,7 @@ Channels → RRF → optional rerank → C1/C2 packaging → optional digests.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from openstinger.config import RetrievalConfig
@@ -14,19 +15,34 @@ from openstinger.search.packer import pack_items
 from openstinger.search.ranker import rrf_fuse, retrieval_confidence
 from openstinger.search.reranker import build_reranker
 from openstinger.temporal.search_utils import (
+    apply_preference_boost,
+    apply_preference_context_boost,
+    apply_query_noun_boost,
     apply_recency_packaging,
     diversify_by_source,
+    effective_search_limit,
     extract_query_focus_terms,
     extract_search_terms,
     extract_subqueries,
+    extract_topic_nouns,
+    extract_topic_phrases,
+    force_include_expertise_episodes,
+    force_include_focus_episodes,
+    force_include_topic_episodes,
+    is_activity_duration_query,
     is_count_query,
+    is_errand_count_query,
+    is_preference_context_query,
     is_recommend_query,
+    is_topic_inventory_query,
     package_episode_row,
     prioritize_query_entity_recency,
     sanitize_bm25_query,
+    build_activity_duration_digest,
     build_expertise_digest,
     build_inventory_digest,
     build_preference_digest,
+    build_topic_inventory_digest,
 )
 
 logger = logging.getLogger(__name__)
@@ -59,8 +75,9 @@ class RetrievalPipeline:
         w.update(self.config.channel_weights or {})
         return w
 
-    def _fetch_limit(self, limit: int) -> int:
-        raw = max(limit, 1) * max(self.config.candidate_multiplier, 1)
+    def _fetch_limit(self, limit: int, query: str = "") -> int:
+        eff = effective_search_limit(query, limit) if query else max(limit, 1)
+        raw = eff * max(self.config.candidate_multiplier, 1)
         return min(raw, self.config.candidate_cap)
 
     async def search(
@@ -117,9 +134,15 @@ class RetrievalPipeline:
     ) -> dict[str, Any]:
         engine = self.engine
         cfg = self.config
-        fetch_limit = self._fetch_limit(limit)
+        fetch_limit = self._fetch_limit(limit, query)
         bm25_query = sanitize_bm25_query(query)
         terms = extract_search_terms(query)
+        for phrase in extract_topic_phrases(query):
+            if phrase not in terms:
+                terms.append(phrase)
+        for noun in extract_topic_nouns(query):
+            if noun not in terms:
+                terms.append(noun)
         subqueries = extract_subqueries(
             query, experimental_lexicons=cfg.experimental_lexicons
         )
@@ -297,37 +320,100 @@ class RetrievalPipeline:
             limit=fetch_limit,
         )
 
-        # Rerank
+        # Rerank (preserve order; append unscored tail)
         reranker_name = cfg.reranker
-        reranker = build_reranker(reranker_name, llm=getattr(engine, "llm", None))
+        reranker = build_reranker(
+            reranker_name,
+            llm=getattr(engine, "llm", None),
+            timeout_ms=cfg.rerank_timeout_ms,
+        )
+        head = fused_pool[: cfg.rerank_top_n]
+        tail = fused_pool[cfg.rerank_top_n :]
         try:
             import asyncio
-            fused_pool = await asyncio.wait_for(
-                reranker.rerank(query, fused_pool[: cfg.rerank_top_n], text_key="content"),
+
+            reranked = await asyncio.wait_for(
+                reranker.rerank(query, head, text_key="content"),
                 timeout=cfg.rerank_timeout_ms / 1000.0,
             )
+            # Only rewrite scores when a real reranker ran (noop must keep RRF scores)
+            if reranker_name and reranker_name != "none":
+                for i, row in enumerate(reranked):
+                    row["fusion_score"] = float(len(reranked) - i)
+                    if row.get("rerank_score") is not None:
+                        row["score"] = float(row["rerank_score"])
+                    else:
+                        row["score"] = row["fusion_score"]
+            fused_pool = reranked + tail
         except Exception as exc:
             logger.debug("Rerank skipped/failed: %s", exc)
 
-        # Promote statement hits that reference episode via source fields
-        for row in fused_pool:
-            if row.get("result_type") is None:
-                if row.get("content") is not None:
-                    row["result_type"] = "episode"
-                elif row.get("text") is not None:
-                    row["result_type"] = "statement"
-                    row.setdefault("content", row.get("text"))
+        # Promote statement hits to parent episodes when linked
+        fused_pool = await self._hydrate_statement_hits(fused_pool)
 
-        # C1 labels/conflicts (do not re-sort by score)
+        # Selective post-fusion boosts (avoid reordering errand counts: RRF already
+        # retrieves clothing gold; answer digests fix aggregation).
+        if is_recommend_query(query):
+            fused_pool = apply_preference_boost(fused_pool, query)
+            fused_pool = force_include_expertise_episodes(fused_pool, query, fetch_limit)
+        if (
+            is_preference_context_query(query)
+            or is_topic_inventory_query(query)
+            or is_activity_duration_query(query)
+        ):
+            fused_pool = apply_query_noun_boost(fused_pool, query)
+            fused_pool = apply_preference_context_boost(fused_pool, query)
+            phrases = extract_topic_phrases(query)
+            # Activity questions often use single tokens (jogging, yoga)
+            act_terms = extract_topic_nouns(query) if is_activity_duration_query(query) else []
+            match_terms = list(dict.fromkeys(phrases + act_terms))
+            if match_terms:
+                by_uuid = {r.get("uuid"): r for r in fused_pool if r.get("uuid")}
+                for r in contains_rows or []:
+                    uid = r.get("uuid")
+                    if not uid:
+                        continue
+                    cl = (r.get("content") or "").lower()
+                    if not any(t in cl for t in match_terms):
+                        continue
+                    if uid in by_uuid:
+                        if not by_uuid[uid].get("content") and r.get("content"):
+                            by_uuid[uid]["content"] = r.get("content")
+                    else:
+                        by_uuid[uid] = dict(r)
+                fused_pool = list(by_uuid.values())
+            fused_pool = force_include_topic_episodes(
+                fused_pool, query, fetch_limit
+            )
+            # Keep boosted ranks ahead of stale RRF fusion_score values
+            for r in fused_pool:
+                if r.get("topic_forced") or r.get("noun_boost") or r.get("preference_boost"):
+                    r["fusion_score"] = float(r.get("score") or 0)
+        fused_pool = force_include_focus_episodes(
+            fused_pool, focus_rows or [], fetch_limit
+        )
+
+        boosted = is_recommend_query(query) or is_preference_context_query(query)
+
+        # C1 labels/conflicts
         labeled, conflicts = apply_recency_packaging(fused_pool)
-        # Restore RRF/rerank order
-        order_ids = [r.get("uuid") for r in fused_pool if r.get("uuid")]
-        by_id = {r.get("uuid"): r for r in labeled if r.get("uuid")}
-        ordered = [by_id[uid] for uid in order_ids if uid in by_id]
-        for r in labeled:
-            uid = r.get("uuid")
-            if uid and uid not in by_id:
-                ordered.append(r)
+        if boosted or is_topic_inventory_query(query) or is_activity_duration_query(query):
+            ordered = sorted(
+                labeled,
+                key=lambda r: (
+                    0 if r.get("topic_forced") or r.get("expertise_forced") else 1,
+                    -float(r.get("score") or 0),
+                ),
+            )
+        else:
+            # Preserve RRF/rerank order for fair errand / factoid paths
+            order_ids = [r.get("uuid") for r in fused_pool if r.get("uuid")]
+            by_id = {r.get("uuid"): r for r in labeled if r.get("uuid")}
+            ordered = [by_id[uid] for uid in order_ids if uid in by_id]
+            for r in labeled:
+                uid = r.get("uuid")
+                if uid and uid not in by_id:
+                    ordered.append(r)
 
         # C2 diversity then package
         diversified = diversify_by_source(ordered, fetch_limit)
@@ -373,10 +459,18 @@ class RetrievalPipeline:
                 exp = build_expertise_digest(episodes, query)
                 if exp:
                     digests["expertise"] = exp
-            if is_count_query(query):
+            if is_errand_count_query(query):
                 inv = build_inventory_digest(episodes, query)
                 if inv:
                     digests["inventory"] = inv
+            elif is_activity_duration_query(query):
+                act = build_activity_duration_digest(episodes, query)
+                if act:
+                    digests["activity"] = act
+            elif is_count_query(query) or is_topic_inventory_query(query):
+                top = build_topic_inventory_digest(episodes, query)
+                if top:
+                    digests["topic_inventory"] = top
 
         ranked = (
             [{**r, "result_type": "episode"} for r in episodes]
@@ -427,6 +521,9 @@ class RetrievalPipeline:
         payloads: dict[str, dict] = {}
         for kw in sorted(set(contain_terms), key=lambda w: (-len(w), w))[:12]:
             try:
+                # Multi-word phrases need a wide scan: CONTAINS has no relevance
+                # order. Do not ORDER BY time (that drops older answer sessions).
+                kw_limit = 150 if " " in kw else max(fetch_limit, 40)
                 rows = await engine.driver.query_temporal(
                     f"""
                     MATCH (ep:Episode {{agent_namespace: $namespace}})
@@ -441,7 +538,7 @@ class RetrievalPipeline:
                     {
                         "namespace": namespace,
                         "kw": kw.lower(),
-                        "limit": max(fetch_limit, 30),
+                        "limit": kw_limit,
                         **time_params,
                     },
                 )
@@ -449,7 +546,13 @@ class RetrievalPipeline:
                     uid = r.get("uuid")
                     if not uid:
                         continue
-                    scores[uid] = scores.get(uid, 0.0) + 1.0 + (len(kw) / 20.0)
+                    # Prefer first-person ownership language for inventory phrases
+                    cl = (r.get("content") or "").lower()
+                    owned = 0.35 if (
+                        " " in kw
+                        and re.search(r"\b(?:my|i(?:'ve| have)?)\b.{0,60}" + re.escape(kw), cl)
+                    ) else 0.0
+                    scores[uid] = scores.get(uid, 0.0) + 1.0 + (len(kw) / 20.0) + owned
                     payloads[uid] = {**r, "score": scores[uid], "search_type": "contains"}
             except Exception as exc:
                 logger.debug("CONTAINS failed for %r: %s", kw, exc)
@@ -614,7 +717,9 @@ class RetrievalPipeline:
                 YIELD node, score
                 WHERE node.agent_namespace = $namespace
                 RETURN node.uuid AS uuid, node.text AS text, node.text AS content,
-                       node.valid_at AS valid_at, score
+                       node.kind AS kind, node.valid_at AS valid_at,
+                       node.source_description AS source_description,
+                       node.episode_uuid AS episode_uuid, score
                 """,
                 {"embedding": embedding, "namespace": namespace, "limit": fetch_limit},
             )
@@ -627,7 +732,9 @@ class RetrievalPipeline:
                 YIELD node, score
                 WHERE node.agent_namespace = $namespace
                 RETURN node.uuid AS uuid, node.text AS text, node.text AS content,
-                       node.valid_at AS valid_at, score
+                       node.kind AS kind, node.valid_at AS valid_at,
+                       node.source_description AS source_description,
+                       node.episode_uuid AS episode_uuid, score
                 ORDER BY score DESC LIMIT $limit
                 """,
                 {
@@ -639,6 +746,86 @@ class RetrievalPipeline:
         except Exception as exc:
             logger.debug("Statement BM25 unavailable: %s", exc)
         return vec, bm25
+
+    async def _hydrate_statement_hits(self, rows: list[dict]) -> list[dict]:
+        """
+        Promote Statement hits to parent Episode content when DISTILLED_TO exists.
+
+        Keeps statement text as via_statement / cue so ranking still reflects the atom,
+        while answer packaging gets full episode context and session attribution.
+        """
+        if not rows:
+            return rows
+        stmt_ids = [
+            r.get("uuid")
+            for r in rows
+            if r.get("uuid") and (r.get("episode_uuid") or r.get("kind"))
+        ]
+        if not stmt_ids:
+            for row in rows:
+                if row.get("result_type") is None:
+                    if row.get("content") is not None:
+                        row["result_type"] = "episode"
+                    elif row.get("text") is not None:
+                        row["result_type"] = "statement"
+                        row.setdefault("content", row.get("text"))
+            return rows
+
+        by_stmt: dict[str, dict] = {}
+        try:
+            linked = await self.engine.driver.query_temporal(
+                """
+                UNWIND $uuids AS suid
+                MATCH (ep:Episode)-[:DISTILLED_TO]->(s:Statement {uuid: suid})
+                RETURN s.uuid AS stmt_uuid, s.text AS stmt_text, s.kind AS kind,
+                       ep.uuid AS uuid, ep.content AS content,
+                       ep.valid_at AS valid_at, ep.valid_at_human AS valid_at_human,
+                       ep.source_description AS source_description
+                """,
+                {"uuids": list(dict.fromkeys(stmt_ids))},
+            )
+            for row in linked or []:
+                suid = row.get("stmt_uuid")
+                if suid:
+                    by_stmt[suid] = row
+        except Exception as exc:
+            logger.debug("Statement hydrate failed: %s", exc)
+
+        out: list[dict] = []
+        seen_eps: set[str] = set()
+        for row in rows:
+            suid = row.get("uuid")
+            parent = by_stmt.get(suid) if suid else None
+            if parent and parent.get("uuid"):
+                ep_uuid = parent["uuid"]
+                if ep_uuid in seen_eps:
+                    continue
+                seen_eps.add(ep_uuid)
+                merged = dict(parent)
+                merged["result_type"] = "episode"
+                merged["via_statement"] = parent.get("stmt_text") or row.get("text")
+                merged["kind"] = parent.get("kind") or row.get("kind")
+                merged["score"] = row.get("score")
+                merged["fusion_score"] = row.get("fusion_score", row.get("score"))
+                merged["rerank_score"] = row.get("rerank_score")
+                if merged.get("via_statement"):
+                    merged["cue_summary"] = f"retained: {merged['via_statement'][:200]}"
+                out.append(merged)
+                continue
+            if row.get("result_type") is None:
+                if row.get("content") is not None and row.get("kind") is None:
+                    row["result_type"] = "episode"
+                elif row.get("text") is not None:
+                    row["result_type"] = "statement"
+                    row.setdefault("content", row.get("text"))
+            # Deduplicate episodes already promoted
+            uid = row.get("uuid")
+            if row.get("result_type") == "episode" and uid and uid in seen_eps:
+                continue
+            if row.get("result_type") == "episode" and uid:
+                seen_eps.add(uid)
+            out.append(row)
+        return out
 
     async def _recency_channel(self, namespace, fetch_limit, after_unix, before_unix, time_params):
         try:
