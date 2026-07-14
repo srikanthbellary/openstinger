@@ -179,6 +179,40 @@ def test_inventory_digest_skips_policy_noise():
     ) == ""
 
 
+def test_inventory_digest_skips_advice_and_keeps_real_errands():
+    from openstinger.temporal.search_utils import build_inventory_digest
+
+    hits = [
+        {
+            "source_description": "s1",
+            "cues": {
+                "actions": [
+                    "pick up your new boots and return any items that don't fit quite right",
+                    "return some boots to Zara",
+                    "pick up the new pair at Zara",
+                ]
+            },
+            "content": "x",
+        },
+        {
+            "source_description": "s2",
+            "cues": {
+                "actions": [
+                    "pick up my dry cleaning for the navy blue blazer",
+                ]
+            },
+            "content": "y",
+        },
+    ]
+    dig = build_inventory_digest(
+        hits, "How many items of clothing do I need to pick up or return from a store?"
+    )
+    assert "don't fit" not in dig.lower()
+    assert "Suggested outstanding obligations listed: 3." in dig
+    assert "boots" in dig.lower()
+    assert "drycleaning" in dig.lower() or "blazer" in dig.lower()
+
+
 def test_expertise_digest_scopes_recommend():
     from openstinger.temporal.search_utils import build_expertise_digest, apply_preference_boost
     deep = (

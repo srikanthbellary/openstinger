@@ -510,7 +510,11 @@ _ERRAND_NOISE_RE = re.compile(
     r"designated\s+spot|folder\s+or\s+envelope|to-do\s+list|"
     r"well-deserved|decluttering|don'?t\s+forget|"
     r"pick\s+up\s+or\s+return|perfect\s+excuse|"
-    r"dry\s+clean\s+only)",
+    r"dry\s+clean\s+only|"
+    r"return\s+any\s+items|don'?t\s+fit\s+quite|"
+    r"any\s+items\s+that\s+don'?t|"
+    r"she'?ll\s+return|lent\s+(?:it|them)|"
+    r"when\s+she(?:'|’)?ll\s+return)",
     re.I,
 )
 _ITEM_KEY_STOP = {
@@ -521,7 +525,8 @@ _ITEM_KEY_STOP = {
     "be", "have", "your", "with", "into", "about", "item", "items", "soon",
     "reminder", "list", "break", "come", "back", "always", "quite", "right",
     "any", "fit", "got", "february", "meeting", "weeks", "ago", "wore",
-    "not", "dont", "does", "did", "will", "might", "want", "add",
+    "not", "dont", "don", "does", "did", "will", "might", "want", "add",
+    "quite", "tips", "track",
 }
 _ITEM_KEY_STOP |= {tok for name in _STORE_NAMES for tok in name.lower().split()}
 
@@ -1190,6 +1195,7 @@ def build_inventory_digest(hits: list[dict], query: str = "") -> str:
     # cluster_key -> {tags, sample, sid}
     clusters: dict[str, dict[str, Any]] = {}
     last_key_by_sid: dict[str, str] = {}
+    last_item_by_sid: dict[str, str] = {}
     order: list[str] = []
 
     for h in hits:
@@ -1219,16 +1225,19 @@ def build_inventory_digest(hits: list[dict], query: str = "") -> str:
                 continue
             item_key = _errand_item_key(a)
             prev = last_key_by_sid.get(f"{sid}|{tag}")
-            if item_key == "unknown" and not prev:
+            # Same-session follow-ups often say "the new pair" with no noun;
+            # inherit the prior concrete item from this session.
+            if item_key == "unknown":
+                item_key = prev or last_item_by_sid.get(sid) or "unknown"
+            if item_key == "unknown":
                 continue
             if prev and _item_keys_compatible(item_key, prev):
-                if item_key == "unknown" or (
-                    prev != "unknown" and len(prev) >= len(item_key)
-                ):
+                if prev != "unknown" and len(prev) >= len(item_key):
                     item_key = prev
                 last_key_by_sid[f"{sid}|{tag}"] = item_key
-            elif item_key != "unknown":
+            else:
                 last_key_by_sid[f"{sid}|{tag}"] = item_key
+            last_item_by_sid[sid] = item_key
 
             if prev and prev != item_key and _item_keys_compatible(prev, item_key):
                 old_id = f"{sid}|{tag}|{prev}"
@@ -1277,10 +1286,10 @@ def build_inventory_digest(hits: list[dict], query: str = "") -> str:
     n = min(len(order), 8)
     lines.append(f"Suggested outstanding obligations listed: {n}.")
     lines.append(
-        "Default to this count when each bullet is a distinct open pickup/return that matches "
-        "the question. Only drop a bullet if the excerpts clearly show that obligation was already "
-        "completed or is unrelated. RETURN and PICKUP of the same product can both remain open. "
-        "Verify against the session excerpts."
+        f"Answer with only the integer {n} (the suggested outstanding-obligation count). "
+        "Do not substitute a lower count from a partial re-read of the excerpts. "
+        "RETURN and PICKUP of the same product can both remain open and both count. "
+        "Only use a different integer if a bullet is clearly completed or unrelated."
     )
     return "\n".join(lines)
 
@@ -1536,6 +1545,8 @@ def build_preference_digest(hits: list[dict]) -> str:
         lines.append("- features: " + ", ".join(feats[:8]))
     lines.append(
         "Give a concrete recommendation for the asked place/topic using these preferences; "
-        "do not refuse solely because another city appears in the session."
+        "do not refuse solely because another city appears in the session. "
+        "For hotel questions: open with a matching hotel suggestion for the asked city; "
+        "never answer that you lack Miami/city hotels when these features are listed."
     )
     return "\n".join(lines)
