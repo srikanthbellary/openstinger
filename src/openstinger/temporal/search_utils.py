@@ -1419,15 +1419,23 @@ def build_topic_inventory_digest(hits: list[dict], query: str = "") -> str:
     if n == 0:
         return ""
     if title_hints:
+        uniq = title_hints[:10]
         lines.append(
             "Candidate titled purchases/downloads (dedupe by title across sessions; "
             "include signed/purchased vinyl): "
-            + "; ".join(title_hints[:10])
+            + "; ".join(uniq)
         )
-    lines.append(
-        f"Sessions with topic overlap listed: {n}. Enumerate every distinct matching "
-        "item across sessions, then give the total integer together with the item names."
-    )
+        lines.append(f"Suggested distinct purchases/downloads listed: {len(uniq)}.")
+        lines.append(
+            f"Answer with the integer {len(uniq)} plus the item names. "
+            "Count signed or purchased vinyl as one item even without a formal album title. "
+            "Do not leave vinyl undecided or drop it after deliberation."
+        )
+    else:
+        lines.append(
+            f"Sessions with topic overlap listed: {n}. Enumerate every distinct matching "
+            "item across sessions, then give the total integer together with the item names."
+        )
     return "\n".join(lines)
 
 
