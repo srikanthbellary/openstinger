@@ -330,6 +330,306 @@ def test_query_noun_and_preference_context_boost():
     assert by_b["maint"].get("preference_boost")
 
 
+def test_extract_event_atoms():
+    from openstinger.temporal.search_utils import extract_event_atoms
+
+    text = (
+        "user: I visited my dermatologist yesterday for a skin check. "
+        "It went well.\n"
+        "assistant: Glad to hear! You should keep monitoring it.\n"
+        "user: I also started a new yoga class last week. "
+        "I'm thinking about buying a new mat someday. "
+        "I would go to Paris if I could."
+    )
+    atoms = extract_event_atoms(text)
+    joined = " | ".join(atoms).lower()
+    assert "dermatologist" in joined
+    assert "yoga" in joined
+    # Plans / hypotheticals excluded
+    assert "paris" not in joined
+    assert "someday" not in joined
+
+
+def test_coverage_select_and_sibling_harvest():
+    from openstinger.temporal.search_utils import (
+        coverage_select_for_aggregate,
+        harvest_sibling_terms,
+        is_aggregate_query,
+    )
+
+    q = "How many different doctors did I visit?"
+    assert is_aggregate_query(q)
+    assert not is_aggregate_query("Where does my sister Emily live?")
+    cands = [
+        {"uuid": "a1", "source_description": "s1", "score": 0.9,
+         "content": "I visited my primary care doctor Dr. Smith on Monday."},
+        {"uuid": "a2", "source_description": "s1", "score": 0.85,
+         "content": "More chat about the doctor visit and Dr. Smith."},
+        {"uuid": "b1", "source_description": "s2", "score": 0.2,
+         "content": "The dermatologist doctor, Dr. Jones, checked my skin."},
+        {"uuid": "c1", "source_description": "s3", "score": 0.1,
+         "content": "Nothing medical here, just cooking pasta."},
+    ]
+    out = coverage_select_for_aggregate(cands, q, 10)
+    srcs = [r["source_description"] for r in out[:2]]
+    assert "s1" in srcs and "s2" in srcs
+
+    sib = harvest_sibling_terms(
+        [{"content": "I visited a doctor named Dr. Ramirez at Cedars Clinic."}], q
+    )
+    assert any("ramirez" in t or "cedars" in t for t in sib)
+
+
+def test_aggregate_reading_digest_surfaces_counts_and_money():
+    from openstinger.temporal.search_utils import (
+        build_aggregate_reading_digest,
+        extract_and_conjuncts,
+        is_aggregate_query,
+    )
+
+    assert {
+        x.lower()
+        for x in extract_and_conjuncts(
+            "How many plants did I initially plant for tomatoes and cucumbers?"
+        )
+    } == {"tomatoes", "cucumbers"}
+    assert {
+        x.lower()
+        for x in extract_and_conjuncts(
+            "What is the minimum amount I could get if I sold the vintage diamond necklace and the antique vanity?"
+        )
+    } == {"diamond necklace", "antique vanity"}
+    assert {
+        x.lower()
+        for x in extract_and_conjuncts(
+            "How much would I save by taking the bus instead of a taxi?"
+        )
+    } == {"bus", "taxi"}
+    assert {
+        x.lower()
+        for x in extract_and_conjuncts(
+            "What is the total number of goals and assists I have in the recreational indoor soccer league?"
+        )
+    } == {"goals", "assists"}
+    assert {
+        x.lower()
+        for x in extract_and_conjuncts(
+            "What is the total number of lunch meals I got from the chicken fajitas and lentil soup?"
+        )
+    } == {"chicken fajitas", "lentil soup"}
+
+    assert is_aggregate_query(
+        "What is the minimum amount I could get if I sold the necklace and vanity?"
+    )
+    hits = [
+        {
+            "source_description": "s1",
+            "content": "User: I planted 5 tomato plants in the backyard.",
+            "valid_at_human": "2023-03-01",
+        },
+        {
+            "source_description": "s2",
+            "content": "User: I also planted 3 cucumber plants near the fence.",
+            "valid_at_human": "2023-03-08",
+        },
+        {
+            "source_description": "s3",
+            "content": "User: I'm selling my vintage diamond necklace, which is worth $5,000.",
+            "valid_at_human": "2023-04-01",
+        },
+        {
+            "source_description": "s4",
+            "content": "User: The antique vanity is worth at least $150 after I restored it.",
+            "valid_at_human": "2023-04-02",
+        },
+    ]
+    plants = build_aggregate_reading_digest(
+        hits, "How many plants did I initially plant for tomatoes and cucumbers?"
+    )
+    assert "Suggested aggregate count" in plants
+    assert "8" in plants
+    money = build_aggregate_reading_digest(
+        hits,
+        "What is the minimum amount I could get if I sold the vintage diamond necklace and the antique vanity?",
+    )
+    assert "Suggested money total" in money
+    assert "5150" in money
+    # Incomplete conjunct: only one side priced → do not invent a total
+    incomplete = build_aggregate_reading_digest(
+        hits[:3],
+        "What is the minimum amount I could get if I sold the vintage diamond necklace and the antique vanity?",
+    )
+    assert "Incomplete money evidence" in incomplete
+    # Open enumeration must not force a blind sum of every integer
+    films = build_aggregate_reading_digest(
+        [
+            {
+                "source_description": "f1",
+                "content": "User: I watched Iron Man and also saw 2 trailers.",
+                "valid_at_human": "a",
+            },
+            {
+                "source_description": "f2",
+                "content": "User: I watched Thor last month.",
+                "valid_at_human": "b",
+            },
+        ],
+        "How many MCU films did I watch in the last 3 months?",
+    )
+    assert "Suggested aggregate count (sum" not in films
+    assert "Enumerate" in films or "distinct" in films.lower() or "Candidate" in films
+
+
+def test_temporal_span_excludes_content_and_spend_lookups():
+    from openstinger.temporal.search_utils import (
+        asks_temporal_span_integer,
+        is_temporal_ago_query,
+        is_temporal_span_query,
+    )
+
+    # Duration counts: keep
+    assert is_temporal_ago_query("How many weeks ago did I start using Ibotta?")
+    assert asks_temporal_span_integer(
+        "How many days passed between my visit to MoMA and the Met?"
+    )
+    assert asks_temporal_span_integer(
+        "How many weeks have I been taking sculpting classes when I bought tools?"
+    )
+    assert asks_temporal_span_integer(
+        "How many days did it take for my shutter release cable to arrive after I ordered it?"
+    )
+
+    # Content / order / spend: must not force a bare integer
+    content_qs = [
+        "Which book did I finish a week ago?",
+        "I mentioned that I participated in an art-related event two weeks ago. Where was that event held at?",
+        "What was the significant business milestone I mentioned four weeks ago?",
+        "What is the order of the three events: ShopRite, Walmart, and Ibotta?",
+        "How much total money did I spend on attending workshops in the last four months?",
+        "How many days did I spend in total traveling in Hawaii and in New York City?",
+        "How many years older am I than when I graduated from college?",
+    ]
+    for q in content_qs:
+        assert not is_temporal_ago_query(q), q
+        assert not is_temporal_span_query(q), q
+        assert not asks_temporal_span_integer(q), q
+
+
+def test_activity_sum_and_temporal_ago_digest():
+    from openstinger.temporal.search_utils import (
+        build_activity_duration_digest,
+        build_temporal_span_digest,
+        is_temporal_ago_query,
+    )
+
+    assert is_temporal_ago_query("How many weeks ago did I start using Ibotta?")
+    hits = [
+        {
+            "source_description": "g1",
+            "content": "I spent around 70 hours playing Assassin's Creed Odyssey.",
+            "valid_at_human": "2023-05-01",
+        },
+        {
+            "source_description": "g2",
+            "content": "It took me 30 hours to finish The Last of Us Part II on hard.",
+            "valid_at_human": "2023-05-10",
+        },
+        {
+            "source_description": "g3",
+            "content": "Celeste took me 10 hours to complete.",
+            "valid_at_human": "2023-05-12",
+        },
+        {
+            "source_description": "g4",
+            "content": "It took me 25 hours to complete on normal difficulty.",
+            "valid_at_human": "2023-05-15",
+        },
+        {
+            "source_description": "g5",
+            "content": "Hyper Light Drifter, which took me 5 hours to finish.",
+            "valid_at_human": "2023-05-18",
+        },
+    ]
+    ad = build_activity_duration_digest(
+        hits, "How many hours have I spent playing games in total?"
+    )
+    assert "Suggested total hours listed: 140" in ad
+    assert "Candidate duration sum" in ad
+
+    span_hits = [
+        {
+            "source_description": "b1",
+            "content": "I attended a baking class at a local culinary school.",
+            "valid_at_human": "2022-03-25",
+        }
+    ]
+    sd = build_temporal_span_digest(
+        span_hits,
+        "How many days ago did I attend a baking class at a local culinary school?",
+    )
+    assert "ago" in sd.lower()
+    assert "question_date" in sd or "baking" in sd.lower()
+
+
+def test_soft_advice_and_temporal_ago_detection():
+    from openstinger.temporal.search_utils import (
+        apply_preference_boost,
+        is_activity_duration_query,
+        is_soft_advice_query,
+        is_temporal_span_query,
+        needs_preference_retrieval,
+    )
+
+    tips = "My kitchen's becoming a bit of a mess again. Any tips for keeping it clean?"
+    dinner = "What should I serve for dinner this weekend with my homegrown ingredients?"
+    advice = "I've been struggling with my slow cooker recipes. Any advice on getting better results?"
+    from openstinger.temporal.search_utils import soft_advice_bridge_terms
+
+    assert is_soft_advice_query(tips)
+    assert is_soft_advice_query(dinner)
+    assert is_soft_advice_query(advice)
+    assert is_soft_advice_query(
+        "I was thinking of trying a new coffee creamer recipe. Any recommendations?"
+    )
+    assert is_soft_advice_query("Can you suggest some useful accessories for my phone?")
+    assert needs_preference_retrieval(tips)
+    assert needs_preference_retrieval(dinner)
+    assert not is_soft_advice_query("Can you recommend a hotel in Miami?")
+    kit_bridges = soft_advice_bridge_terms(tips)
+    assert "utensil" in kit_bridges or "utensil holder" in kit_bridges
+    dinner_bridges = soft_advice_bridge_terms(dinner)
+    assert "garden" in dinner_bridges or "tomato" in dinner_bridges
+    phone = "I've been having trouble with the battery life on my phone lately. Any tips?"
+    assert "power bank" in soft_advice_bridge_terms(phone)
+    guitar = (
+        "I'm getting excited about my visit to the music store this weekend. "
+        "Any tips on what to look for in a new guitar?"
+    )
+    assert "guitar" in soft_advice_bridge_terms(guitar)
+    creamer = "I was thinking of trying a new coffee creamer recipe. Any recommendations?"
+    creamer_bridges = soft_advice_bridge_terms(creamer)
+    assert "creamer" in creamer_bridges or "almond milk" in creamer_bridges
+    assert "tomato" not in creamer_bridges and "garden" not in creamer_bridges
+    assert is_temporal_span_query(
+        "How many days ago did I attend a baking class at a local culinary school?"
+    )
+    assert is_activity_duration_query(
+        "How many hours did I spend playing games last week?"
+    )
+    rows = [
+        {
+            "uuid": "kit",
+            "content": "I love my new utensil holder and worry about the granite near the sink.",
+            "score": 0.05,
+            "cues": {"preferences": ["keep granite clean"], "features": ["utensil holder"]},
+        },
+        {"uuid": "noise", "content": "I watched a movie last night.", "score": 0.2},
+    ]
+    boosted = apply_preference_boost(rows, tips)
+    by_id = {r["uuid"]: r for r in boosted}
+    assert by_id["kit"]["score"] >= by_id["noise"]["score"]
+
+
 def test_activity_and_topic_digests():
     from openstinger.temporal.search_utils import (
         build_activity_duration_digest,

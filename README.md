@@ -27,6 +27,8 @@ The autonomous era needs more than execution. Agents hallucinate facts. They dri
 
 Built on [FalkorDB](https://falkordb.com) (bi-temporal graph + vector) and [PostgreSQL](https://postgresql.org) (operational audit DB), served over [Model Context Protocol](https://modelcontextprotocol.io). No SDK changes. No vendor lock-in.
 
+LongMemEval-S fair path (lite ingest, no retain/rerank): **75.2%** on the full 500-question suite.
+
 ## Integration Modes
 
 OpenStinger works alongside any *Claw framework's built-in memory — or replaces it entirely. Three adoption modes, zero switching cost:

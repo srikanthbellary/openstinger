@@ -19,8 +19,11 @@ from openstinger.temporal.search_utils import (
     apply_preference_context_boost,
     apply_query_noun_boost,
     apply_recency_packaging,
+    coverage_select_for_aggregate,
     diversify_by_source,
     effective_search_limit,
+    harvest_sibling_terms,
+    is_aggregate_query,
     extract_query_focus_terms,
     extract_temporal_anchors,
     extract_search_terms,
@@ -35,14 +38,20 @@ from openstinger.temporal.search_utils import (
     is_errand_count_query,
     is_preference_context_query,
     is_recommend_query,
+    is_soft_advice_query,
     is_temporal_span_query,
     is_topic_inventory_query,
+    needs_preference_retrieval,
     package_episode_row,
     prioritize_query_entity_recency,
     sanitize_bm25_query,
+    soft_advice_bridge_terms,
+    event_attend_bridge_terms,
+    fact_lookup_bridge_terms,
     build_activity_duration_digest,
     build_expertise_digest,
     build_inventory_digest,
+    build_maintenance_digest,
     build_preference_digest,
     build_temporal_span_digest,
     build_topic_inventory_digest,
@@ -52,6 +61,7 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_WEIGHTS = {
     "bm25_primary": 1.0,
+    "bm25_primary_or": 0.8,
     "bm25_subqueries": 0.9,
     "vector_episodes": 1.0,
     "contains_terms": 0.7,
@@ -146,6 +156,15 @@ class RetrievalPipeline:
         for noun in extract_topic_nouns(query):
             if noun not in terms:
                 terms.append(noun)
+        for bridge in soft_advice_bridge_terms(query):
+            if bridge not in terms:
+                terms.append(bridge)
+        for bridge in event_attend_bridge_terms(query):
+            if bridge not in terms:
+                terms.append(bridge)
+        for bridge in fact_lookup_bridge_terms(query):
+            if bridge not in terms:
+                terms.append(bridge)
         subqueries = extract_subqueries(
             query, experimental_lexicons=cfg.experimental_lexicons
         )
@@ -169,7 +188,7 @@ class RetrievalPipeline:
         channels: dict[str, list[dict]] = {}
         channels_run: list[str] = []
 
-        async def _bm25(q: str) -> list[dict]:
+        async def _bm25(q: str, *, mode: str = "and") -> list[dict]:
             try:
                 return await engine.driver.query_temporal(
                     f"""
@@ -180,7 +199,7 @@ class RetrievalPipeline:
                     ORDER BY score DESC LIMIT $limit
                     """,
                     {
-                        "query": sanitize_bm25_query(q),
+                        "query": sanitize_bm25_query(q, mode=mode),
                         "namespace": namespace,
                         "limit": fetch_limit,
                         **time_params,
@@ -190,10 +209,17 @@ class RetrievalPipeline:
                 logger.warning("Episode BM25 failed (%r): %s", q, exc)
                 return []
 
-        # Channel: bm25_primary
+        # Channel: bm25_primary (AND: precise, can be empty for verbose questions)
         primary = await _bm25(query)
         channels["bm25_primary"] = primary
         channels_run.append("bm25_primary")
+
+        # Channel: bm25_primary_or (OR: broad recall fallback; TF-IDF still ranks
+        # rare terms high, so gold for verbose questions surfaces here)
+        or_rows = await _bm25(query, mode="or")
+        if or_rows:
+            channels["bm25_primary_or"] = or_rows
+            channels_run.append("bm25_primary_or")
 
         # Channel: bm25_subqueries (each subquery as soft agreement via merge ranks)
         sq_rows: list[dict] = []
@@ -330,6 +356,14 @@ class RetrievalPipeline:
             fuse_weights["contains_terms"] = max(
                 float(fuse_weights.get("contains_terms") or 0.7), 1.0
             )
+        if is_soft_advice_query(query):
+            # Tips/advice omit prior objects; CONTAINS + bridge terms must lead ranking
+            fuse_weights["contains_terms"] = max(
+                float(fuse_weights.get("contains_terms") or 0.7), 1.35
+            )
+            fuse_weights["bm25_subqueries"] = max(
+                float(fuse_weights.get("bm25_subqueries") or 0.9), 1.15
+            )
         fused_pool = rrf_fuse(
             {k: v for k, v in channels.items() if k not in {"vector_facts", "graph_facts"}},
             weights=fuse_weights,
@@ -370,20 +404,35 @@ class RetrievalPipeline:
 
         # Selective post-fusion boosts (avoid reordering errand counts: RRF already
         # retrieves clothing gold; answer digests fix aggregation).
-        if is_recommend_query(query):
+        if needs_preference_retrieval(query):
             fused_pool = apply_preference_boost(fused_pool, query)
             fused_pool = force_include_expertise_episodes(fused_pool, query, fetch_limit)
         if (
             is_preference_context_query(query)
+            or is_soft_advice_query(query)
+            or needs_preference_retrieval(query)
             or is_topic_inventory_query(query)
             or is_activity_duration_query(query)
+            or bool(fact_lookup_bridge_terms(query))
+            or bool(event_attend_bridge_terms(query))
         ):
             fused_pool = apply_query_noun_boost(fused_pool, query)
             fused_pool = apply_preference_context_boost(fused_pool, query)
             phrases = extract_topic_phrases(query)
             # Activity questions often use single tokens (jogging, yoga)
             act_terms = extract_topic_nouns(query) if is_activity_duration_query(query) else []
-            match_terms = list(dict.fromkeys(phrases + act_terms))
+            bridge_terms = (
+                soft_advice_bridge_terms(query)
+                if (is_soft_advice_query(query) or needs_preference_retrieval(query))
+                else []
+            )
+            event_terms = event_attend_bridge_terms(query)
+            fact_terms = fact_lookup_bridge_terms(query)
+            match_terms = list(
+                dict.fromkeys(
+                    phrases + act_terms + bridge_terms + event_terms + fact_terms
+                )
+            )
             if match_terms:
                 by_uuid = {r.get("uuid"): r for r in fused_pool if r.get("uuid")}
                 for r in contains_rows or []:
@@ -412,14 +461,29 @@ class RetrievalPipeline:
         if is_temporal_span_query(query):
             for r in fused_pool:
                 if r.get("focus_forced") or r.get("search_type") == "focus_contains":
+                    # Only force multi-word anchor matches; single-word focus hits
+                    # ranked 0.92 flooded top-k with noise (probe phasec_ev1).
+                    ft = r.get("focus_term") or ""
+                    if " " not in ft:
+                        continue
                     r["score"] = max(float(r.get("score") or 0), 0.92)
                     r["fusion_score"] = max(float(r.get("fusion_score") or 0), 0.92)
                     r["focus_forced"] = True
 
+        # Aggregate coverage: prefer distinct topic-matching sessions so multi-hop
+        # counts are not crowded out by one chatty session (LongMemEval multi-session).
+        # Pull missing parts of the same multi-session chat (…_1 …_4) by source family.
+        if is_aggregate_query(query):
+            fused_pool = await self._merge_session_family_siblings(
+                namespace, fused_pool, fetch_limit
+            )
+            fused_pool = coverage_select_for_aggregate(fused_pool, query, fetch_limit)
+
         boosted = (
-            is_recommend_query(query)
+            needs_preference_retrieval(query)
             or is_preference_context_query(query)
             or is_temporal_span_query(query)
+            or is_aggregate_query(query)
         )
 
         # C1 labels/conflicts
@@ -437,6 +501,8 @@ class RetrievalPipeline:
                     if r.get("topic_forced")
                     or r.get("expertise_forced")
                     or r.get("focus_forced")
+                    or r.get("family_forced")
+                    or r.get("coverage_pick")
                     else 1,
                     -float(r.get("score") or 0),
                 ),
@@ -488,13 +554,17 @@ class RetrievalPipeline:
 
         digests: dict[str, str] = {}
         if cfg.keep_digests:
-            if is_recommend_query(query):
+            if needs_preference_retrieval(query):
                 pref = build_preference_digest(episodes)
                 if pref:
                     digests["preferences"] = pref
                 exp = build_expertise_digest(episodes, query)
                 if exp:
                     digests["expertise"] = exp
+            elif is_preference_context_query(query):
+                maint = build_maintenance_digest(episodes, query)
+                if maint:
+                    digests["maintenance"] = maint
             if is_errand_count_query(query):
                 inv = build_inventory_digest(episodes, query)
                 if inv:
@@ -596,9 +666,69 @@ class RetrievalPipeline:
                     payloads[uid] = {**r, "score": scores[uid], "search_type": "contains"}
             except Exception as exc:
                 logger.debug("CONTAINS failed for %r: %s", kw, exc)
+        # Soft-advice needs a wider CONTAINS pool so bridge hits are not truncated
+        keep = max(fetch_limit * 2, 24) if any(
+            " " in (t or "") for t in contain_terms
+        ) else fetch_limit
         return sorted(payloads.values(), key=lambda r: r.get("score", 0), reverse=True)[
-            :fetch_limit
+            :keep
         ]
+
+    async def _merge_session_family_siblings(
+        self, namespace: str, fused_pool: list[dict], fetch_limit: int
+    ) -> list[dict]:
+        """
+        Fetch other episodes that share a source-family stem with top hits.
+
+        Multi-part chats (answer_xxx_1 … _4) often split facts across sessions;
+        when one part ranks, pull the siblings so aggregate enumeration can see them.
+        """
+        if not fused_pool:
+            return fused_pool
+        families: list[str] = []
+        for r in fused_pool[:16]:
+            src = (r.get("source_description") or "").lower()
+            m = re.search(r"(answer_[0-9a-f]+|[0-9a-f]{8})", src)
+            if m and m.group(1) not in families:
+                families.append(m.group(1))
+            if len(families) >= 4:
+                break
+        if not families:
+            return fused_pool
+
+        engine = self.engine
+        by_uuid = {r.get("uuid"): r for r in fused_pool if r.get("uuid")}
+        for fam in families:
+            try:
+                rows = await engine.driver.query_temporal(
+                    """
+                    MATCH (ep:Episode {agent_namespace: $namespace})
+                    WHERE toLower(ep.source_description) CONTAINS $fam
+                    RETURN ep.uuid AS uuid, ep.content AS content,
+                           ep.valid_at AS valid_at, ep.valid_at_human AS valid_at_human,
+                           ep.source_description AS source_description
+                    LIMIT $limit
+                    """,
+                    {
+                        "namespace": namespace,
+                        "fam": fam,
+                        "limit": max(8, min(fetch_limit, 12)),
+                    },
+                )
+            except Exception as exc:
+                logger.debug("family sibling fetch failed for %r: %s", fam, exc)
+                continue
+            for r in rows or []:
+                uid = r.get("uuid")
+                if not uid or uid in by_uuid:
+                    continue
+                row = dict(r)
+                row["score"] = max(float(row.get("score") or 0), 0.64)
+                row["fusion_score"] = row["score"]
+                row["search_type"] = "session_family"
+                row["family_forced"] = True
+                by_uuid[uid] = row
+        return list(by_uuid.values())
 
     async def _focus_contains(
         self, namespace, focus_terms, fetch_limit, after_unix, before_unix, time_params
@@ -607,6 +737,9 @@ class RetrievalPipeline:
         out: list[dict] = []
         seen: set[str] = set()
         for focus in focus_terms[:8]:
+            # Substring CONTAINS on short single words is noise ('star' in 'start').
+            if " " not in focus and len(focus) < 5:
+                continue
             try:
                 rows = await engine.driver.query_temporal(
                     f"""
@@ -627,11 +760,16 @@ class RetrievalPipeline:
                         **time_params,
                     },
                 )
+                pat = re.compile(r"\b" + re.escape(focus) + r"\b", re.I)
                 for r in rows:
                     uid = r.get("uuid")
-                    if uid and uid not in seen:
-                        seen.add(uid)
-                        out.append({**r, "search_type": "focus_contains", "focus_term": focus})
+                    if not uid or uid in seen:
+                        continue
+                    # Enforce word boundaries for single-word focus terms
+                    if " " not in focus and not pat.search(r.get("content") or ""):
+                        continue
+                    seen.add(uid)
+                    out.append({**r, "search_type": "focus_contains", "focus_term": focus})
             except Exception as exc:
                 logger.debug("Focus CONTAINS failed for %r: %s", focus, exc)
         return out
