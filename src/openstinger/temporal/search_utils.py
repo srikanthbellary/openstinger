@@ -495,6 +495,8 @@ _TEMPORAL_SPAN_COUNT_RE = re.compile(
     r"\bbetween the day\b|"
     r"\bpassed between\b|"
     r"\bhave passed since\b|"
+    # Offset: "how many days before <event A> did I <event B>"
+    r"\bhow many (?:days?|weeks?|months?)\s+before\b|"
     # Duration-to-complete: "how many weeks did it take me to watch…"
     r"\bhow many (?:days?|weeks?|months?|years?) did it take\b|"
     # Shipping latency: how many days from order → arrive (no "passed" wording)
@@ -1761,6 +1763,22 @@ def build_aggregate_reading_digest(hits: list[dict], query: str = "") -> str:
         re.search(r"\b(?:how much|\$|money|sold|spend|spent|minimum|raise)\b", ql)
     )
     open_enumerate = bool(re.search(r"\bhow many\b", ql)) and not conjuncts
+    # Acquire/re-watch questions: allow hyponym objects when the session is already
+    # on-topic (matched query nouns) but the span uses acquire verbs without
+    # repeating the head noun ("brought home a monstera" for plants).
+    acquire_open = open_enumerate and bool(
+        re.search(
+            r"\b(?:acquire|acquired|buy|bought|purchased|own|owned|get|got|"
+            r"re-?watch(?:ed)?|subscribe(?:d)?|service|serviced|set up)\b",
+            ql,
+        )
+    )
+    _ACQUIRE_VERB_RE = re.compile(
+        r"\b(?:bought|purchased|downloaded|got|ordered|tried|watched|re-?watched|"
+        r"owned?|picked up|assembled|fixed|sold|learned|cooked|acquired|adopted|"
+        r"brought home|brought it home|subscribed(?:\s+to)?|set up|serviced)\b",
+        re.I,
+    )
     multi_action = bool(
         re.search(
             r"\b(?:buy|bought|assemble|assembled|sell|sold|fix|fixed)\b"
@@ -1778,6 +1796,14 @@ def build_aggregate_reading_digest(hits: list[dict], query: str = "") -> str:
     seen_items: set[str] = set()
     session_hits = 0
     seen_sid: set[str] = set()
+    # At least one hit already names a question noun → allow hyponym acquire
+    # sessions in the same pool ("peace lily" for plants).
+    topic_anchored = any(
+        soft_contains((h.get("content") or ""), t)
+        for h in hits
+        for t in terms
+        if t and len(t) >= 3
+    )
 
     def _pair_object(text: str) -> str | None:
         best = None
@@ -1825,10 +1851,18 @@ def build_aggregate_reading_digest(hits: list[dict], query: str = "") -> str:
                 cl,
             )
         )
+        hyponym_acquire = (
+            acquire_open
+            and topic_anchored
+            and not matched
+            and bool(_ACQUIRE_VERB_RE.search(cl))
+            and bool(re.search(r"\b(?:i|i've|i am|i'm|my)\b", cl, re.I))
+        )
         if (
             not matched
             and not (conjuncts and any(soft_contains(cl, c) for c in conjuncts))
             and not action_hit
+            and not hyponym_acquire
         ):
             continue
         sid = (h.get("source_description") or h.get("uuid") or "?").strip()
@@ -1842,7 +1876,12 @@ def build_aggregate_reading_digest(hits: list[dict], query: str = "") -> str:
         user_chunks = re.findall(r"(?im)^(?:user|human)\s*:\s*(.+)$", content)
         scan = "\n".join(user_chunks) if user_chunks else content
 
-        for term in (matched or conjuncts or (["furniture"] if action_hit else []))[:4]:
+        for term in (
+            matched
+            or conjuncts
+            or (["furniture"] if action_hit else [])
+            or (["acquire"] if hyponym_acquire else [])
+        )[:4]:
             for m in re.finditer(re.escape(term), scan, re.I):
                 window = scan[max(0, m.start() - 50) : m.end() + 90]
                 if not re.search(
@@ -1886,7 +1925,22 @@ def build_aggregate_reading_digest(hits: list[dict], query: str = "") -> str:
             n = _parse_count_token(num_s)
             if n is None or n <= 0 or n > 5000:
                 continue
+            # "bought … two weeks ago" is a duration, not an item count
+            after_num = scan[m.end() : m.end() + 24]
+            if re.match(
+                r"\s*(?:weeks?|days?|months?|years?|hours?|minutes?|ago)\b",
+                after_num,
+                re.I,
+            ):
+                continue
             span = re.sub(r"\s+", " ", m.group(0)).strip()
+            if re.search(
+                r"\b(?:two|three|four|five|six|seven|eight|nine|ten|\d+)\s+"
+                r"(?:weeks?|days?|months?|years?)\b",
+                span,
+                re.I,
+            ):
+                continue
             around = scan[max(0, m.start() - 40) : m.end() + 40]
             pool = conjuncts or matched or terms
             if not any(soft_contains(around, t) for t in pool):
@@ -1897,8 +1951,13 @@ def build_aggregate_reading_digest(hits: list[dict], query: str = "") -> str:
         if open_enumerate:
             enum_pats = [
                 r"\b(?:i(?:'ve| have)?|my)\b[^\n.]{0,120}?\b(?:bought|purchased|"
-                r"downloaded|got|ordered|tried|watched|owned?|picked up|assembled|"
-                r"fixed|sold|learned|cooked)\b[^\n.]{0,80}",
+                r"downloaded|ordered|tried|watched|re-?watched|owned?|picked up|"
+                r"assembled|fixed|sold|learned|cooked|acquired|adopted|brought home|"
+                r"brought it home|subscribed(?:\s+to)?|set up|serviced|service|"
+                r"got\s+(?:a|an|the|my|from))\b[^\n.]{0,80}",
+                # "snake plant, which I got from my sister"
+                r"\b[A-Za-z][A-Za-z0-9 '-]{2,40}\b[^\n.]{0,40}?\bwhich\s+i\s+got\s+from\b"
+                r"[^\n.]{0,40}",
             ]
             if multi_action:
                 enum_pats.append(
@@ -1919,7 +1978,13 @@ def build_aggregate_reading_digest(hits: list[dict], query: str = "") -> str:
                             re.I,
                         )
                     )
-                    if not term_ok and not action_ok:
+                    # On-topic pool + acquire verb: count hyponym gets
+                    acquire_ok = (
+                        acquire_open
+                        and (bool(matched) or hyponym_acquire)
+                        and bool(_ACQUIRE_VERB_RE.search(span))
+                    )
+                    if not term_ok and not action_ok and not acquire_ok:
                         continue
                     # Dedupe by specific object phrase (coffee table ≠ kitchen table)
                     obj_m = re.search(
@@ -1929,11 +1994,109 @@ def build_aggregate_reading_digest(hits: list[dict], query: str = "") -> str:
                         span,
                         re.I,
                     )
-                    key = obj_m.group(0).lower() if obj_m else span.lower()[:80]
-                    if key in seen_items:
+                    # Prefer object after acquire verb so hyponyms dedupe cleanly
+                    acq_obj = re.search(
+                        r"\b(?:bought|purchased|acquired|adopted|ordered|"
+                        r"brought home|brought it home|re-?watched|"
+                        r"subscribed(?:\s+to)?|set up|serviced)\b\s+"
+                        r"(?:a|an|the|my|our)?\s*"
+                        r"([A-Za-z][A-Za-z0-9 '-]{2,40})"
+                        r"|\bgot\s+(?!from\b)(?:a|an|the|my|our)?\s*"
+                        r"([A-Za-z][A-Za-z0-9 '-]{2,40})"
+                        r"|\b([A-Za-z][A-Za-z0-9 '-]{2,30}\s+plant)\s*,?\s*"
+                        r"which\s+i\s+got\s+from\b",
+                        span,
+                        re.I,
+                    )
+                    if acq_obj:
+                        acq_name = next(
+                            (g for g in acq_obj.groups() if g), None
+                        )
+                    else:
+                        acq_name = None
+                    _q_nouns = {
+                        re.sub(r"s$", "", t.lower())
+                        for t in terms
+                        if t and len(t) >= 3
+                    } | {"plant", "plants", "item", "items", "thing", "things"}
+
+                    def _item_key(raw: str) -> str | None:
+                        t = (raw or "").strip().lower()
+                        t = re.sub(r"\s+", " ", t)
+                        m_bought = re.search(
+                            r"\bbought\s+(?:a|an|the|my)?\s*"
+                            r"([a-z]+(?:\s+[a-z]+)?)",
+                            t,
+                        )
+                        if m_bought and m_bought.group(1) not in _q_nouns:
+                            return m_bought.group(1)
+                        m_which = re.search(
+                            r"\b(?:my|a|an|the)\s+"
+                            r"([a-z]+(?:\s+[a-z]+)?)\s*,?\s*which\s+i\s+got\s+from\b",
+                            t,
+                        )
+                        if m_which and m_which.group(1) not in _q_nouns:
+                            return m_which.group(1)
+                        # Prefer "… plant" / "… lily" heads for stable dedupe
+                        m_head = re.search(
+                            r"\b([a-z]+(?:\s+[a-z]+)?\s+plants?|[a-z]+\s+lily|"
+                            r"succulent(?:\s+plant)?)\b",
+                            t,
+                        )
+                        if m_head:
+                            head = m_head.group(1)
+                            head_norm = re.sub(r"s$", "", head)
+                            if head in _q_nouns or head_norm in _q_nouns:
+                                return None
+                            return head
+                        # No stable object key → skip (avoids duplicate nursery chatter)
+                        return None
+
+                    if obj_m:
+                        key = _item_key(obj_m.group(0))
+                    elif acq_name:
+                        key = _item_key(acq_name) or (
+                            acq_name.strip().lower()[:40]
+                            if acq_name.strip().lower() not in _q_nouns
+                            else None
+                        )
+                    else:
+                        key = _item_key(span)
+                    if not key or key in seen_items:
                         continue
                     seen_items.add(key)
                     distinct_items.append(span[:100])
+                    # "got X along with a Y" / "bought X and a Y" → two items
+                    for m_aw in re.finditer(
+                        r"\balong with\s+(?:a|an|the|my)?\s*"
+                        r"([A-Za-z][A-Za-z0-9 '-]{2,40})"
+                        r"|(?:\bbought|\bgot|\bpurchased|\bacquired)\b[^\n.]{0,60}?"
+                        r"\band\s+(?:a|an|the|my)\s+"
+                        r"([A-Za-z][A-Za-z0-9 '-]{2,40})",
+                        span,
+                        re.I,
+                    ):
+                        raw_extra = next((g for g in m_aw.groups() if g), None)
+                        if not raw_extra:
+                            continue
+                        extra = _item_key(raw_extra) or raw_extra.strip().lower()[:40]
+                        if (
+                            not extra
+                            or extra in seen_items
+                            or extra in _q_nouns
+                            or extra
+                            in {
+                                "fertilizer",
+                                "humidifier",
+                                "mixture",
+                                "water",
+                                "tips",
+                                "advice",
+                            }
+                        ):
+                            continue
+                        seen_items.add(extra)
+                        distinct_items.append(f"also {raw_extra.strip()}"[:100])
 
         if money_q:
             for m in money_pat.finditer(scan):
@@ -2082,13 +2245,15 @@ def build_aggregate_reading_digest(hits: list[dict], query: str = "") -> str:
             return n, around
 
         for m in re.finditer(
-            r"\b(?:i(?:'ve| have)?|i)\b[^\n.]{0,40}?\b(?:tried|watched|bought|"
-            r"assembled|fixed|sold|got|viewed|found|finished|read)\b[^\n.]{0,40}?\b"
+            r"\b(?:i(?:'ve| have)?|i)\b[^\n.]{0,40}?\b(?:tried|watched|re-?watched|"
+            r"bought|assembled|fixed|sold|got|viewed|found|finished|read|"
+            r"acquired|adopted|planted|subscribed)\b[^\n.]{0,40}?\b"
             r"(\d{1,4}|one|two|three|four|five|six|seven|eight|nine|ten|"
             r"eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|"
             r"eighteen|nineteen|twenty)\b"
             r"[^\n.]{0,40}?\b(?:of|recipes?|films?|movies?|pieces?|items?|"
-            r"skeins?|issues?|balls?|copies|titles?)\b",
+            r"plants?|tanks?|subscriptions?|skeins?|issues?|balls?|copies|"
+            r"titles?)\b",
             blob,
             re.I,
         ):
@@ -2159,6 +2324,11 @@ def build_aggregate_reading_digest(hits: list[dict], query: str = "") -> str:
         lines.append(
             f"Suggested distinct item count: {len(distinct_items[:10])}."
         )
+        if re.search(r"\bincluding\b", ql):
+            lines.append(
+                "Question says including: count every listed on-topic item "
+                "(including gifted/set-up/for-someone-else), not only personal buys."
+            )
         lines.append(
             f"Answer with the integer {len(distinct_items[:10])} plus short names "
             "when helpful. Count distinct items, do not sum every number in memory."
@@ -2661,12 +2831,31 @@ def build_temporal_span_digest(
             return None
         return m.group(1).strip(), m.group(2).strip()
 
+    def _days_before_sides(q: str) -> tuple[str, str] | None:
+        """
+        'How many days before <later A> did I <earlier B>?'
+
+        Returns (later_side, earlier_side) for A←B offset math.
+        """
+        m = re.search(
+            r"\bhow many (?:days?|weeks?|months?)\s+before\b(.+?)\bdid i\b(.+?)(?:\?|$)",
+            q or "",
+            re.I,
+        )
+        if not m:
+            return None
+        later = m.group(1).strip(" .,;:")
+        earlier = m.group(2).strip(" .,;:")
+        if len(later) < 4 or len(earlier) < 4:
+            return None
+        return later, earlier
+
     def _side_event_keys(side: str) -> list[str]:
         """Distinctive multi-word / noun keys for one side of a between-day span."""
         weak = {
             "day", "days", "started", "start", "favorite", "songs", "song",
             "main", "took", "take", "made", "make", "local", "old", "new",
-            "along", "playing", "discovered", "discover",
+            "along", "playing", "discovered", "discover", "before", "after",
         }
         keys: list[str] = []
         seen: set[str] = set()
@@ -2741,6 +2930,50 @@ def build_temporal_span_digest(
                     f"Suggested span from listed event dates: {span_n} {unit} "
                     f"({delta_days} days between paired event sides "
                     f"{early.date().isoformat()} → {late.date().isoformat()})."
+                )
+                lines.append(
+                    f"Answer with the integer {span_n} unless a listed anchor "
+                    "clearly does not match the asked events."
+                )
+                content_span_done = True
+
+    # Days-before A←B: pair later reference A with earlier event B (not global
+    # min/max, which collapses when buy+chat share one session stamp → 0 days).
+    before_sides = _days_before_sides(query or "")
+    if not ago and not content_span_done and before_sides:
+        later_keys = _side_event_keys(before_sides[0])
+        earlier_keys = _side_event_keys(before_sides[1])
+        later_dts: list[Any] = []
+        earlier_dts: list[Any] = []
+        for h in hits:
+            content = h.get("content") or ""
+            dt = _parse_when(h)
+            if dt is None:
+                continue
+            if _side_hit(content, later_keys, before_sides[0]):
+                later_dts.append(dt)
+            if _side_hit(content, earlier_keys, before_sides[1]):
+                earlier_dts.append(dt)
+        if later_dts and earlier_dts:
+            later_dt = min(later_dts)
+            earlier_dt = min(earlier_dts)
+            delta_days = (later_dt.date() - earlier_dt.date()).days
+            if delta_days > 0:
+                ql = (query or "").lower()
+                if "week" in ql:
+                    span_n = max(0, int(round(delta_days / 7.0)))
+                    unit = "weeks"
+                elif "month" in ql:
+                    span_n = max(0, int(round(delta_days / 30.0)))
+                    unit = "months"
+                else:
+                    span_n = delta_days
+                    unit = "days"
+                lines.append(
+                    f"Suggested span from listed event dates: {span_n} {unit} "
+                    f"({delta_days} days before later event "
+                    f"{earlier_dt.date().isoformat()} → "
+                    f"{later_dt.date().isoformat()})."
                 )
                 lines.append(
                     f"Answer with the integer {span_n} unless a listed anchor "
@@ -2823,7 +3056,9 @@ def build_temporal_span_digest(
             else:
                 span_n = max(0, delta_days)
                 unit = "days"
-            if not (shipping and span_n == 0):
+            # Never push a bare 0: same-day session stamps are usually packaging
+            # noise, not a real answer (days-before / between-event fails).
+            if span_n > 0:
                 lines.append(
                     f"Suggested span from listed event dates: {span_n} {unit} "
                     f"({delta_days} days between earliest and latest dated anchors)."

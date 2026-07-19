@@ -582,6 +582,102 @@ def test_activity_sum_and_temporal_ago_digest():
     assert "question_date" in sd or "baking" in sd.lower()
 
 
+def test_aggregate_enumerate_acquire_and_rewatch_verbs():
+    from openstinger.temporal.search_utils import build_aggregate_reading_digest
+
+    # Gold shape: two acquires in one utterance + one "which I got from"
+    along_hits = [
+        {
+            "source_description": "a1",
+            "content": (
+                "user: I'm caring for my peace lily, which I got from the nursery "
+                "two weeks ago along with a succulent."
+            ),
+        },
+        {
+            "source_description": "a2",
+            "content": (
+                "user: My snake plant, which I got from my sister last month, "
+                "is doing great."
+            ),
+        },
+    ]
+    ad = build_aggregate_reading_digest(
+        along_hits, "How many plants did I acquire in the last month?"
+    )
+    assert "Suggested distinct item count: 3" in ad
+    assert "along with" in ad.lower() or "succulent" in ad.lower()
+    # "two weeks ago" must not become Candidate numeric claim 2
+    assert "Candidate numeric claims: 2←" not in ad
+
+    movie_hits = [
+        {
+            "source_description": "m1",
+            "content": "user: I re-watched the Marvel movie Iron Man last night.",
+        },
+        {
+            "source_description": "m2",
+            "content": "user: I rewatched another Marvel movie, The Avengers.",
+        },
+    ]
+    md = build_aggregate_reading_digest(
+        movie_hits, "How many Marvel movies did I re-watch?"
+    )
+    assert "Suggested distinct item count: 2" in md
+
+
+def test_days_before_span_pairs_later_and_earlier():
+    from openstinger.temporal.search_utils import (
+        asks_temporal_span_integer,
+        build_temporal_span_digest,
+    )
+
+    q = (
+        "How many days before I bought the iPhone 13 Pro did I attend "
+        "the Holiday Market?"
+    )
+    assert asks_temporal_span_integer(q)
+    hits = [
+        {
+            "source_description": "m1",
+            "content": "I went to the Holiday Market downtown with friends.",
+            "valid_at_human": "2023/12/10",
+        },
+        {
+            "source_description": "m2",
+            "content": "I finally bought the iPhone 13 Pro today.",
+            "valid_at_human": "2023/12/17",
+        },
+        {
+            "source_description": "noise",
+            "content": "I bought coffee and attended a webinar.",
+            "valid_at_human": "2023/11/01",
+        },
+    ]
+    digest = build_temporal_span_digest(hits, q)
+    assert "Suggested span from listed event dates: 7 days" in digest
+    assert "Answer with the integer 7" in digest
+
+    same_stamp = [
+        {
+            "source_description": "s1",
+            "content": "I ordered her gift online for the birthday party.",
+            "valid_at_human": "2023/06/01",
+        },
+        {
+            "source_description": "s1b",
+            "content": "My best friend's birthday party was wonderful.",
+            "valid_at_human": "2023/06/01",
+        },
+    ]
+    # Collapsed stamps must not force Suggested span 0 into the answer path.
+    zero_q = (
+        "How many days before my best friend's birthday party did I order her gift?"
+    )
+    zero_digest = build_temporal_span_digest(same_stamp, zero_q)
+    assert "Suggested span from listed event dates: 0" not in zero_digest
+
+
 def test_soft_advice_and_temporal_ago_detection():
     from openstinger.temporal.search_utils import (
         apply_preference_boost,
