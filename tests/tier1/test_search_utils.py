@@ -582,6 +582,39 @@ def test_activity_sum_and_temporal_ago_digest():
     assert "question_date" in sd or "baking" in sd.lower()
 
 
+def test_rewatch_count_prefers_titles_not_watched_n():
+    from openstinger.temporal.search_utils import (
+        build_aggregate_reading_digest,
+        is_rewatch_count_query,
+    )
+
+    q = "How many Marvel movies did I re-watch?"
+    assert is_rewatch_count_query(q)
+    hits = [
+        {
+            "source_description": "r1",
+            "content": (
+                "user: Since I just re-watched Avengers: Endgame yesterday, "
+                "I've been thinking about other movies. I've actually watched "
+                "Doctor Strange already, it was one of the four Marvel movies "
+                "I watched recently."
+            ),
+        },
+        {
+            "source_description": "r2",
+            "content": (
+                "user: I've been into Marvel movies lately, I also re-watched "
+                "Spider-Man: No Way Home, which is another Marvel movie."
+            ),
+        },
+    ]
+    d = build_aggregate_reading_digest(hits, q)
+    assert "Suggested distinct item count: 2" in d
+    assert "Suggested stated total from first-person count claim:" not in d
+    assert "Avengers: Endgame" in d
+    assert "Spider-Man: No Way Home" in d
+
+
 def test_aggregate_enumerate_acquire_and_rewatch_verbs():
     from openstinger.temporal.search_utils import build_aggregate_reading_digest
 

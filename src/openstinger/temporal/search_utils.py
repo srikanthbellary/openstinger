@@ -552,6 +552,15 @@ def is_topic_inventory_query(query: str) -> bool:
     return bool(extract_topic_nouns(query) or extract_topic_phrases(query))
 
 
+def is_rewatch_count_query(query: str) -> bool:
+    """How many X did I re-watch (titles), not how many I watched in total."""
+    q = query or ""
+    return bool(
+        re.search(r"\bhow many\b", q, re.I)
+        and re.search(r"\bre-?watch", q, re.I)
+    )
+
+
 def content_has_preference_cues(content: str) -> bool:
     return bool(_PREF_CUE_RE.search(content or ""))
 
@@ -1763,6 +1772,7 @@ def build_aggregate_reading_digest(hits: list[dict], query: str = "") -> str:
         re.search(r"\b(?:how much|\$|money|sold|spend|spent|minimum|raise)\b", ql)
     )
     open_enumerate = bool(re.search(r"\bhow many\b", ql)) and not conjuncts
+    rewatch_q = is_rewatch_count_query(query)
     # Acquire/re-watch questions: allow hyponym objects when the session is already
     # on-topic (matched query nouns) but the span uses acquire verbs without
     # repeating the head noun ("brought home a monstera" for plants).
@@ -1876,6 +1886,33 @@ def build_aggregate_reading_digest(hits: list[dict], query: str = "") -> str:
         user_chunks = re.findall(r"(?im)^(?:user|human)\s*:\s*(.+)$", content)
         scan = "\n".join(user_chunks) if user_chunks else content
 
+        # Re-watch counts: enumerate titled re-watches only (not "watched N movies").
+        if rewatch_q:
+            for m in re.finditer(
+                r"\bre-?watched\s+"
+                r"(?:(?:the|a|an|another)\s+)*(?:Marvel\s+movies?\s*,?\s*)?"
+                r"([A-Z0-9][^.\n]{1,70}?)"
+                r"(?=\s*,|\s+which\b|\s+yesterday\b|\s+last\b|\s+this\b|"
+                r"\s+and\b|\s+I've\b|\s+I\b|\.|$)",
+                scan,
+            ):
+                title = m.group(1).strip()
+                title = re.split(r"\s+which\b", title, maxsplit=1)[0].strip()
+                title = re.sub(r"\s+", " ", title).strip(" .:;-")
+                if len(title) < 3:
+                    continue
+                key = title.lower()
+                if key in seen_items:
+                    continue
+                # Drop if no topic overlap when question names a franchise
+                if terms and not any(
+                    soft_contains(title, t) or soft_contains(scan, t) for t in terms
+                ):
+                    if not re.search(r"[A-Z]", title):
+                        continue
+                seen_items.add(key)
+                distinct_items.append(f"re-watched {title}"[:100])
+
         for term in (
             matched
             or conjuncts
@@ -1947,8 +1984,9 @@ def build_aggregate_reading_digest(hits: list[dict], query: str = "") -> str:
                 continue
             number_claims.append((n, f"{span[:100]}{stamp}", _pair_object(around)))
 
-        # Distinct item spans for open enumeration (first-person acquire/use)
-        if open_enumerate:
+        # Distinct item spans for open enumeration (first-person acquire/use).
+        # Re-watch titles are harvested above; skip generic acquire enum there.
+        if open_enumerate and not rewatch_q:
             enum_pats = [
                 r"\b(?:i(?:'ve| have)?|my)\b[^\n.]{0,120}?\b(?:bought|purchased|"
                 r"downloaded|ordered|tried|watched|re-?watched|owned?|picked up|"
@@ -2212,9 +2250,10 @@ def build_aggregate_reading_digest(hits: list[dict], query: str = "") -> str:
     # Prefer an explicit first-person total over span enumeration when present.
     # Rank by how many query nouns appear near the claim so '5 MCU films' beats
     # a generic 'watched 12 films' from a different topic.
+    # Re-watch questions must NOT use plain "watched N" / "one of the four" totals.
     stated_ranked: list[tuple[int, int]] = []  # (specificity, n)
     adjacent_ns: list[int] = []
-    if open_enumerate or (not conjuncts and not money_q):
+    if (open_enumerate or (not conjuncts and not money_q)) and not rewatch_q:
         blob = "\n".join(
             (h.get("content") or "")
             for h in hits
