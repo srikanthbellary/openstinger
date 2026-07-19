@@ -498,6 +498,17 @@ def test_temporal_span_excludes_content_and_spend_lookups():
     assert asks_temporal_span_integer(
         "How many days did it take for my shutter release cable to arrive after I ordered it?"
     )
+    # Watch/read effort totals are NOT calendar spans
+    assert not asks_temporal_span_integer(
+        "How many weeks did it take me to watch all the Marvel Cinematic Universe "
+        "movies and the main Star Wars films?"
+    )
+    from openstinger.temporal.search_utils import is_stated_effort_duration_query
+
+    assert is_stated_effort_duration_query(
+        "How many weeks did it take me to watch all the Marvel Cinematic Universe "
+        "movies and the main Star Wars films?"
+    )
 
     # Content / order / spend: must not force a bare integer
     content_qs = [

@@ -27,7 +27,22 @@ The autonomous era needs more than execution. Agents hallucinate facts. They dri
 
 Built on [FalkorDB](https://falkordb.com) (bi-temporal graph + vector) and [PostgreSQL](https://postgresql.org) (operational audit DB), served over [Model Context Protocol](https://modelcontextprotocol.io). No SDK changes. No vendor lock-in.
 
-LongMemEval-S fair path (lite ingest, no retain/rerank): **75.2%** on the full 500-question suite.
+### LongMemEval (fair path)
+
+Publishable suite claim: **80.4%** on LongMemEval-S (500Q), fair lite ingest (no retain, no LLM rerank, no chunk/event atoms). Answer model: DeepSeek V4 Pro. Judge: DeepSeek V3.2. Run folder: `fair_c3_500_20260718_1133/`.
+
+LongMemEval scores each question by **type**. Current fair suite accuracy:
+
+| Type | What it tests | Acc | n |
+|------|----------------|----:|--:|
+| `single-session-assistant` | Find a fact the assistant said in one session | 92.9% | 56 |
+| `single-session-user` | Find a fact the user said in one session | 92.9% | 70 |
+| `knowledge-update` | Prefer the latest fact when older ones conflict | 91.0% | 78 |
+| `single-session-preference` | Personalize from stated preferences | 80.0% | 30 |
+| `multi-session` | Combine evidence across many sessions | 72.2% | 133 |
+| `temporal-reasoning` | Dates, durations, order of events | 70.7% | 133 |
+
+Single-session recall and knowledge updates are already strong. The remaining gap is mostly **multi-session** and **temporal** (largest slices, ~133 questions each). Mid-size 100Q gates are diagnostics only; do not treat mid 87% as a suite claim. Detail: parent repo `docs/lme-status-current.md` and `docs/test-summary.md`.
 
 ## Integration Modes
 

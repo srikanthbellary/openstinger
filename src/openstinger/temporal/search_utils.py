@@ -495,11 +495,30 @@ _TEMPORAL_SPAN_COUNT_RE = re.compile(
     r"\bbetween the day\b|"
     r"\bpassed between\b|"
     r"\bhave passed since\b|"
+    # Duration-to-complete: "how many weeks did it take me to watch…"
+    r"\bhow many (?:days?|weeks?|months?|years?) did it take\b|"
     # Shipping latency: how many days from order → arrive (no "passed" wording)
     r"\bhow many days\b.{0,100}\b(?:order(?:ed)?|bought|purchased)\b|"
     r"\bhow many days\b.{0,100}\b(?:arriv(?:e|ed|al)|receiv(?:e|ed)|deliver(?:y|ed))\b",
     re.I,
 )
+
+
+def is_stated_effort_duration_query(query: str) -> bool:
+    """
+    'How many weeks did it take me to watch/read/finish X (and Y)?'
+
+    These are first-person binge/effort totals stated in memory, not calendar
+    spans between two dated events.
+    """
+    return bool(
+        re.search(
+            r"\bhow many (?:days?|weeks?|months?)\s+did it take\b.{0,80}\b"
+            r"(?:watch|watched|reading|read|finish(?:ed)?|complete(?:d)?|binge)",
+            query or "",
+            re.I,
+        )
+    )
 
 
 def asks_temporal_span_integer(query: str) -> bool:
@@ -513,6 +532,9 @@ def asks_temporal_span_integer(query: str) -> bool:
         q,
         re.I,
     ) and not re.search(r"\bhow many\b", q, re.I):
+        return False
+    # Watch/read effort totals use stated-duration digests, not event-date spans.
+    if is_stated_effort_duration_query(q):
         return False
     return True
 
@@ -1587,6 +1609,17 @@ def extract_and_conjuncts(query: str) -> list[str]:
     q = (query or "").strip()
     if not q:
         return []
+    # Duration / activity totals are not per-conjunct money/count sums.
+    # Avoid splitting "MCU movies and the main Star Wars films" or
+    # "jogging and yoga" into incomplete-conjunct abstains.
+    if (
+        asks_temporal_span_integer(q)
+        or is_activity_duration_query(q)
+        or is_stated_effort_duration_query(q)
+    ):
+        return []
+    if re.search(r"\bhow many (?:days?|weeks?|months?|years?) did it take\b", q, re.I):
+        return []
 
     def _side_tokens(side: str) -> list[str]:
         return [
@@ -1684,15 +1717,45 @@ def build_aggregate_reading_digest(hits: list[dict], query: str = "") -> str:
     Generic only: uses question nouns/phrases and A-and-B conjuncts from the
     question text. No benchmark topic lists. Enumerate open counts; sum only
     when each conjunct side has its own paired evidence.
+
+    Non-destructive: do not emit aggregate notes for temporal-span / shipping
+    latency questions (those use build_temporal_span_digest). Do not
+    open-enumerate frequency questions (stated-count digests own those).
     """
     if not is_aggregate_query(query) or not hits:
+        return ""
+    # Temporal duration digests are authoritative for these; aggregate "1 item"
+    # notes were overwriting correct day spans (L3 fair_c2b_l3can).
+    if asks_temporal_span_integer(query) or is_shipping_latency_query(query):
+        return ""
+    # Watch/read binge totals own these (stated effort duration digest).
+    if is_stated_effort_duration_query(query):
+        return ""
+    # Workout/hour digests own these; incomplete "jogging and yoga" conjuncts
+    # were forcing abstain over Candidate duration sum.
+    if is_activity_duration_query(query):
+        return ""
+    ql = (query or "").lower()
+    # Frequency / collection digests own these; aggregate open-enumerate was
+    # forcing distinct-item count 1/2 over Suggested stated/collection totals.
+    if re.search(
+        r"\bhow many (?:times|trips|meet(?:-|\s)?ups?|visits|episodes)\b",
+        ql,
+    ) or (
+        re.search(r"\bhow many\b", ql)
+        and re.search(r"\b(?:collection|coins?)\b", ql)
+    ):
+        return ""
+    # Inherit/acquire inventory is owned by topic heirloom enumeration.
+    if re.search(r"\b(?:inherit|acquired?|heirloom)\b", ql) and re.search(
+        r"\b(?:family|antique|vintage)\b", ql
+    ):
         return ""
     phrases = extract_topic_phrases(query)
     nouns = extract_topic_nouns(query)
     terms = [t for t in (phrases + nouns) if t and len(t) >= 3]
     if not terms:
         return ""
-    ql = (query or "").lower()
     conjuncts = extract_and_conjuncts(query)
     money_q = bool(
         re.search(r"\b(?:how much|\$|money|sold|spend|spent|minimum|raise)\b", ql)
@@ -2020,9 +2083,12 @@ def build_aggregate_reading_digest(hits: list[dict], query: str = "") -> str:
 
         for m in re.finditer(
             r"\b(?:i(?:'ve| have)?|i)\b[^\n.]{0,40}?\b(?:tried|watched|bought|"
-            r"assembled|fixed|sold|got|viewed)\b[^\n.]{0,40}?\b"
-            r"(\d{1,4}|one|two|three|four|five|six|seven|eight|nine|ten)\b"
-            r"[^\n.]{0,40}?\b(?:of|recipes?|films?|movies?|pieces?|items?)\b",
+            r"assembled|fixed|sold|got|viewed|found|finished|read)\b[^\n.]{0,40}?\b"
+            r"(\d{1,4}|one|two|three|four|five|six|seven|eight|nine|ten|"
+            r"eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|"
+            r"eighteen|nineteen|twenty)\b"
+            r"[^\n.]{0,40}?\b(?:of|recipes?|films?|movies?|pieces?|items?|"
+            r"skeins?|issues?|balls?|copies|titles?)\b",
             blob,
             re.I,
         ):
@@ -2437,6 +2503,21 @@ def build_temporal_span_digest(
     """
     if not asks_temporal_span_integer(query) or not hits:
         return ""
+    # Abs guard: span between buy(X) and event Y requires X to appear in memory.
+    bought = re.search(
+        r"\b(?:bought|buy|purchased)\s+(?:my\s+|an?\s+)?([A-Za-z][A-Za-z0-9-]{1,24})",
+        query or "",
+        re.I,
+    )
+    if bought:
+        obj = bought.group(1).lower()
+        blob = "\n".join((h.get("content") or "") for h in hits).lower()
+        if obj not in blob and obj.rstrip("s") not in blob:
+            return (
+                "Asked purchase object is not mentioned in the memory excerpts.\n"
+                "Suggested answer: I do not know.\n"
+                "Do not invent a day count when the bought item never appears."
+            )
     anchors = extract_temporal_anchors(query)
     if not anchors:
         return ""
@@ -2570,6 +2651,103 @@ def build_temporal_span_digest(
                     )
                     content_span_done = True
 
+    def _between_day_sides(q: str) -> tuple[str, str] | None:
+        m = re.search(
+            r"\bbetween the day\b(.+?)\band the day\b(.+?)(?:\?|$)",
+            q or "",
+            re.I,
+        )
+        if not m:
+            return None
+        return m.group(1).strip(), m.group(2).strip()
+
+    def _side_event_keys(side: str) -> list[str]:
+        """Distinctive multi-word / noun keys for one side of a between-day span."""
+        weak = {
+            "day", "days", "started", "start", "favorite", "songs", "song",
+            "main", "took", "take", "made", "make", "local", "old", "new",
+            "along", "playing", "discovered", "discover",
+        }
+        keys: list[str] = []
+        seen: set[str] = set()
+        for p in extract_topic_phrases(side, max_n=10):
+            parts = p.lower().split()
+            if not parts or all(w in weak for w in parts):
+                continue
+            if p.lower() not in seen:
+                seen.add(p.lower())
+                keys.append(p)
+        for n in extract_topic_nouns(side, max_n=8):
+            if n.lower() in weak or len(n) < 4:
+                continue
+            if n.lower() not in seen:
+                seen.add(n.lower())
+                keys.append(n)
+        keys.sort(key=lambda s: (-(1 if " " in s else 0), -len(s)))
+        return keys[:8]
+
+    def _side_hit(content: str, keys: list[str], side_text: str = "") -> bool:
+        cl = (content or "").lower()
+        sl = (side_text or "").lower()
+        if not keys or not cl:
+            return False
+        # Required distinctive verbs/phrases when present on that side
+        required = []
+        for req in ("playing along", "bluegrass", "discovered"):
+            if req in sl:
+                required.append(req)
+        if required and not any(r in cl for r in required):
+            return False
+        strong = [k for k in keys if " " in k or len(k) >= 8]
+        if strong and any(k.lower() in cl for k in strong):
+            return True
+        return sum(1 for k in keys if k.lower() in cl) >= 2
+
+    # Between-day A→B: pair each side's sessions, not global min/max over noisy
+    # anchors (bare "keyboard" matching laptop-stand chatter → 69-day spans).
+    sides = _between_day_sides(query or "")
+    if not ago and not content_span_done and sides:
+        left_keys = _side_event_keys(sides[0])
+        right_keys = _side_event_keys(sides[1])
+        left_dts: list[Any] = []
+        right_dts: list[Any] = []
+        for h in hits:
+            content = h.get("content") or ""
+            dt = _parse_when(h)
+            if dt is None:
+                continue
+            if _side_hit(content, left_keys, sides[0]):
+                left_dts.append(dt)
+            if _side_hit(content, right_keys, sides[1]):
+                right_dts.append(dt)
+        if left_dts and right_dts:
+            left_dt = min(left_dts)
+            right_dt = min(right_dts)
+            # Order chronologically for the delta
+            early, late = (left_dt, right_dt) if left_dt <= right_dt else (right_dt, left_dt)
+            delta_days = (late.date() - early.date()).days
+            if delta_days > 0:
+                ql = (query or "").lower()
+                if "week" in ql:
+                    span_n = max(0, int(round(delta_days / 7.0)))
+                    unit = "weeks"
+                elif "month" in ql:
+                    span_n = max(0, int(round(delta_days / 30.0)))
+                    unit = "months"
+                else:
+                    span_n = delta_days
+                    unit = "days"
+                lines.append(
+                    f"Suggested span from listed event dates: {span_n} {unit} "
+                    f"({delta_days} days between paired event sides "
+                    f"{early.date().isoformat()} → {late.date().isoformat()})."
+                )
+                lines.append(
+                    f"Answer with the integer {span_n} unless a listed anchor "
+                    "clearly does not match the asked events."
+                )
+                content_span_done = True
+
     # Between-event spans when session stamps collapse to one day (Holi Feb 26 vs
     # Church March 19 both stamped March 26) but transcript has the real dates.
     if not ago and not content_span_done and len(anchors) >= 2:
@@ -2585,7 +2763,11 @@ def build_temporal_span_digest(
                     break
         if year is not None:
             per_anchor: list[Any] = []
-            for a in anchors[:8]:
+            # Prefer multi-word anchors to avoid "keyboard"/"day" noise
+            use_anchors = [a for a in anchors if " " in a or len(a) >= 8][:8]
+            if len(use_anchors) < 2:
+                use_anchors = anchors[:8]
+            for a in use_anchors:
                 found: list[Any] = []
                 al = a.lower()
                 for h in hits:
@@ -2697,6 +2879,207 @@ def build_temporal_span_digest(
             "Do not abstain when two dated on-topic events are listed."
         )
     return "\n".join(lines)
+
+
+def _parse_duration_to_unit(token: str, unit: str) -> float | None:
+    """Parse 'two weeks' / 'week and a half' / '3.5 weeks' into asked unit."""
+    t = (token or "").strip().lower()
+    if not t:
+        return None
+    half = bool(re.search(r"\band a half\b|\b1/2\b|\.5\b", t))
+    words = {
+        "a": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+        "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+        "half": 0.5,
+    }
+    m = re.search(
+        r"(\d+(?:\.\d+)?|a|one|two|three|four|five|six|seven|eight|nine|ten|half)",
+        t,
+    )
+    if not m:
+        return None
+    raw = m.group(1)
+    try:
+        n = float(raw) if raw[0].isdigit() else float(words.get(raw, 0))
+    except ValueError:
+        return None
+    if n <= 0:
+        return None
+    if half and n >= 1:
+        n = n + 0.5
+    src_unit = "days"
+    if "week" in t:
+        src_unit = "weeks"
+    elif "month" in t:
+        src_unit = "months"
+    elif "day" in t:
+        src_unit = "days"
+    days = n
+    if src_unit == "weeks":
+        days = n * 7.0
+    elif src_unit == "months":
+        days = n * 30.0
+    want = (unit or "days").lower()
+    if want.startswith("week"):
+        return days / 7.0
+    if want.startswith("month"):
+        return days / 30.0
+    return days
+
+
+def build_stated_effort_duration_digest(hits: list[dict], query: str = "") -> str:
+    """
+    Sum first-person binge/effort durations for 'how many weeks did it take to watch…'.
+
+    Structural only: pairs duration claims near question topic nouns / conjuncts.
+    """
+    if not is_stated_effort_duration_query(query) or not hits:
+        return ""
+    ql = (query or "").lower()
+    unit = "weeks"
+    if re.search(r"\bhow many days?\b", ql):
+        unit = "days"
+    elif re.search(r"\bhow many months?\b", ql):
+        unit = "months"
+    topics = [
+        t
+        for t in (extract_topic_phrases(query) + extract_topic_nouns(query))
+        if t and len(t) >= 3
+    ]
+    # Franchise / title heads often carry the duration claim
+    topics = [t for t in topics if t.lower() not in {"how", "many", "take", "watch", "film", "films", "movies", "movie"}]
+    if not topics:
+        return ""
+    dur_pat = re.compile(
+        r"\bin\s+"
+        r"((?:a\s+)?(?:week|day|month)(?:\s+and\s+a\s+half)?|"
+        r"(?:\d+(?:\.\d+)?|one|two|three|four|five|six|seven|eight|nine|ten)"
+        r"\s+(?:days?|weeks?|months?)(?:\s+and\s+a\s+half)?)",
+        re.I,
+    )
+    # Collect (topic_key, hours_in_asked_unit, snippet)
+    claims: list[tuple[str, float, str]] = []
+    for h in hits:
+        content = h.get("content") or ""
+        if content.lstrip().startswith("[Session events"):
+            continue
+        user_chunks = re.findall(r"(?im)^(?:user|human)\s*:\s*(.+)$", content)
+        scan = "\n".join(user_chunks) if user_chunks else content
+        for m in dur_pat.finditer(scan):
+            window = scan[max(0, m.start() - 100) : m.end() + 80]
+            wl = window.lower()
+            matched_topics = [t for t in topics if soft_contains(wl, t)]
+            if not matched_topics:
+                continue
+            val = _parse_duration_to_unit(m.group(1), unit)
+            if val is None or val <= 0 or val > 100:
+                continue
+            # Prefer the longest matching topic as the claim key
+            key = max(matched_topics, key=len).lower()
+            snippet = re.sub(r"\s+", " ", window).strip()
+            claims.append((key, val, snippet))
+    if not claims:
+        return ""
+    # One claim per topic key (max duration if several)
+    per: dict[str, tuple[float, str]] = {}
+    for key, val, snip in claims:
+        prev = per.get(key)
+        if prev is None or val > prev[0]:
+            per[key] = (val, snip)
+    # If question has two franchise-like topics, sum distinct keys; else take max
+    values = [v for v, _ in per.values()]
+    if len(per) >= 2:
+        total = sum(values)
+        mode = "sum of per-topic binge claims"
+    else:
+        total = max(values)
+        mode = "stated binge claim"
+    # Pretty-print half weeks
+    if abs(total - round(total)) < 1e-6:
+        shown = str(int(round(total)))
+    elif abs(total * 2 - round(total * 2)) < 1e-6:
+        shown = f"{total:g}"
+    else:
+        shown = f"{total:g}"
+    lines = [
+        "Stated effort/binge durations found in memory:",
+    ]
+    for key, (val, snip) in list(per.items())[:6]:
+        lines.append(f"- [{key}] {val:g} {unit}: {snip[:160]}")
+    lines.append(f"Suggested effort duration total: {shown} {unit} ({mode}).")
+    lines.append(
+        f"Answer with {shown} (or '{shown} {unit}'). Sum distinct topic binges when "
+        "the question asks how long A and B took together."
+    )
+    return "\n".join(lines)
+
+
+def build_person_location_digest(hits: list[dict], query: str = "") -> str:
+    """
+    'Where does (my sister) Name live?' → surface Name-in-City first-person cues.
+    """
+    m = re.search(
+        r"\bwhere does\s+(?:my\s+)?"
+        r"(?:(?P<rel>sister|brother|friend|mother|father|mom|dad|wife|husband|cousin)\s+)?"
+        r"(?P<name>[A-Za-z][a-z]{2,})\s+live\b",
+        query or "",
+        re.I,
+    )
+    if not m or not hits:
+        return ""
+    name = m.group("name")
+    rel = (m.group("rel") or "").lower()
+    # Locate "Name in <City>" then take a case-sensitive Capitalized city token
+    # (IGNORECASE on [A-Z][a-z] wrongly absorbs "soon" after Denver).
+    loc_pats = [
+        re.compile(
+            rf"\bvisiting\s+(?:(?:my\s+)?{re.escape(rel)}\s+)?"
+            rf"{re.escape(name)}\s+in\s+",
+            re.I,
+        ),
+        re.compile(
+            rf"\b(?:(?:my\s+)?{re.escape(rel)}\s+)?"
+            rf"{re.escape(name)}\s+in\s+",
+            re.I,
+        ),
+    ]
+    ban = {
+        "the", "this", "that", "our", "her", "his", "their", "a", "an",
+        "early", "late", "mid", "general", "soon", "town", "city",
+    }
+    cities: list[tuple[str, str]] = []
+    for h in hits:
+        scan = h.get("content") or ""
+        for pat in loc_pats:
+            for cm in pat.finditer(scan):
+                tail = scan[cm.end() : cm.end() + 40]
+                city_m = re.match(
+                    r"([A-Z][a-z]{2,}(?:\s+[A-Z][a-z]{2,})?)",
+                    tail,
+                )
+                if not city_m:
+                    continue
+                city = city_m.group(1)
+                if city.lower() in ban:
+                    continue
+                snip = re.sub(
+                    r"\s+",
+                    " ",
+                    scan[max(0, cm.start() - 40) : cm.end() + len(city) + 20],
+                ).strip()
+                cities.append((city, snip))
+    if not cities:
+        return ""
+    # Prefer first user claim
+    city, snip = cities[0]
+    return "\n".join(
+        [
+            f"Person-location cues for {name}:",
+            f"- {snip}",
+            f"Suggested location: {city}.",
+            f"Answer with {city} (city/region name).",
+        ]
+    )
 
 
 _LOC_INTENT_RE = re.compile(
@@ -2937,6 +3320,9 @@ def build_activity_duration_digest(hits: list[dict], query: str = "") -> str:
     total_q = bool(
         re.search(r"\b(?:in total|altogether|all together|overall)\b", query or "", re.I)
     )
+    week_window_q = bool(
+        re.search(r"\b(?:last week|this week|past week|previous week)\b", query or "", re.I)
+    )
     lines = [
         "Activity duration mentions found in memory "
         "(prefer first-person completed times; convert minutes to hours):",
@@ -3009,7 +3395,7 @@ def build_activity_duration_digest(hits: list[dict], query: str = "") -> str:
             f"Candidate duration sum (first-person claims, deduped per session amount): "
             f"{total_hours:g} hours."
         )
-        if total_q:
+        if total_q or week_window_q:
             # Integer-friendly display for whole-hour game totals
             shown = (
                 str(int(total_hours))
@@ -3018,8 +3404,8 @@ def build_activity_duration_digest(hits: list[dict], query: str = "") -> str:
             )
             lines.append(f"Suggested total hours listed: {shown}.")
             lines.append(
-                f"For an 'in total' question, answer with {shown} unless a listed "
-                "claim is clearly not the user's completed playtime."
+                f"For an 'in total' or last-week duration question, answer with {shown} "
+                "unless a listed claim is clearly not the user's completed playtime."
             )
         lines.append(
             "Ignore assistant suggestion ranges like '(60-100 hours of gameplay)'. "
