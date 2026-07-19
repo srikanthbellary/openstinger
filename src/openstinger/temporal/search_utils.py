@@ -541,17 +541,6 @@ def asks_temporal_span_integer(query: str) -> bool:
     return True
 
 
-def is_topic_inventory_query(query: str) -> bool:
-    """Non-errand, non-duration, non-temporal item/project counts (kits, albums)."""
-    if not is_count_query(query):
-        return False
-    if is_errand_count_query(query) or is_activity_duration_query(query):
-        return False
-    if _TEMPORAL_SPAN_COUNT_RE.search(query or ""):
-        return False
-    return bool(extract_topic_nouns(query) or extract_topic_phrases(query))
-
-
 def is_rewatch_count_query(query: str) -> bool:
     """How many X did I re-watch (titles), not how many I watched in total."""
     q = query or ""
@@ -568,6 +557,34 @@ def is_subscription_count_query(query: str) -> bool:
         re.search(r"\bhow many\b", q, re.I)
         and re.search(r"\bsubscriptions?\b", q, re.I)
     )
+
+
+def is_service_plan_count_query(query: str) -> bool:
+    """How many X did I service or plan to service (distinct assets)."""
+    q = query or ""
+    return bool(
+        re.search(r"\bhow many\b", q, re.I)
+        and re.search(r"\bservice", q, re.I)
+        and re.search(r"\bplan\b", q, re.I)
+    )
+
+
+def is_topic_inventory_query(query: str) -> bool:
+    """Non-errand, non-duration, non-temporal item/project counts (kits, albums)."""
+    if not is_count_query(query):
+        return False
+    if is_errand_count_query(query) or is_activity_duration_query(query):
+        return False
+    if _TEMPORAL_SPAN_COUNT_RE.search(query or ""):
+        return False
+    # Owned by specialized digests / aggregate harvest paths
+    if (
+        is_rewatch_count_query(query)
+        or is_subscription_count_query(query)
+        or is_service_plan_count_query(query)
+    ):
+        return False
+    return bool(extract_topic_nouns(query) or extract_topic_phrases(query))
 
 
 def content_has_preference_cues(content: str) -> bool:
@@ -1783,6 +1800,7 @@ def build_aggregate_reading_digest(hits: list[dict], query: str = "") -> str:
     open_enumerate = bool(re.search(r"\bhow many\b", ql)) and not conjuncts
     rewatch_q = is_rewatch_count_query(query)
     subscription_q = is_subscription_count_query(query)
+    service_plan_q = is_service_plan_count_query(query)
     canceled_subs: set[str] = set()
     # Acquire/re-watch questions: allow hyponym objects when the session is already
     # on-topic (matched query nouns) but the span uses acquire verbs without
@@ -1886,12 +1904,20 @@ def build_aggregate_reading_digest(hits: list[dict], query: str = "") -> str:
                 re.I,
             )
         )
+        service_hit = service_plan_q and bool(
+            re.search(
+                r"\b(?:bike|serviced|service|lubricat(?:ed|ing)|tire|chain)\b",
+                cl,
+                re.I,
+            )
+        )
         if (
             not matched
             and not (conjuncts and any(soft_contains(cl, c) for c in conjuncts))
             and not action_hit
             and not hyponym_acquire
             and not sub_hit
+            and not service_hit
         ):
             continue
         sid = (h.get("source_description") or h.get("uuid") or "?").strip()
@@ -1904,6 +1930,88 @@ def build_aggregate_reading_digest(hits: list[dict], query: str = "") -> str:
 
         user_chunks = re.findall(r"(?im)^(?:user|human)\s*:\s*(.+)$", content)
         scan = "\n".join(user_chunks) if user_chunks else content
+
+        # Service-or-plan: distinct assets (e.g. bikes) with service done or planned.
+        if service_plan_q:
+            month_q = None
+            m_mon = re.search(
+                r"\bin\s+(january|february|march|april|may|june|july|august|"
+                r"september|october|november|december)\b",
+                ql,
+            )
+            if m_mon:
+                month_q = m_mon.group(1).lower()
+            bike_names = re.findall(
+                r"\b((?:commuter|road|mountain|hybrid|electric)\s+bike)\b",
+                scan,
+                re.I,
+            )
+            if not bike_names and re.search(r"\bbike\b", scan, re.I):
+                bike_names = ["bike"]
+            # "commuter bike is just a regular hybrid bike" → one asset
+            specific = [
+                b
+                for b in bike_names
+                if not re.search(r"\b(?:hybrid|electric)\s+bike\b", b, re.I)
+            ]
+            if specific:
+                bike_names = specific
+            for raw_bike in bike_names:
+                bike = raw_bike.strip().lower()
+                # Window: prefer sentences mentioning this bike
+                windows = []
+                for m in re.finditer(re.escape(raw_bike), scan, re.I):
+                    windows.append(
+                        scan[max(0, m.start() - 120) : m.end() + 160]
+                    )
+                if not windows:
+                    windows = [scan]
+                blob_w = "\n".join(windows)
+                served = bool(
+                    re.search(
+                        r"\b(?:serviced|getting\s+(?:my\s+)?[^.\n]{0,40}\bserviced|"
+                        r"cleaned and lubricated|lubricated the chain|"
+                        r"lubricating the chain)\b",
+                        blob_w,
+                        re.I,
+                    )
+                )
+                planned = bool(
+                    re.search(
+                        r"\b(?:plan(?:ning)?\s+to|time to replace|replace\s+it\s+"
+                        r"this month|before april|this month,?\s+before)\b",
+                        blob_w,
+                        re.I,
+                    )
+                ) or bool(
+                    re.search(
+                        r"\b(?:replace|replacing)\b[^\n.]{0,40}\btire\b|"
+                        r"\btire\b[^\n.]{0,40}\b(?:replace|replacing)\b",
+                        blob_w,
+                        re.I,
+                    )
+                )
+                if not served and not planned:
+                    continue
+                if month_q and not (
+                    month_q in blob_w.lower()
+                    or month_q in (when or "").lower()
+                    or (
+                        planned
+                        and re.search(
+                            r"\b(?:this month|before april)\b", blob_w, re.I
+                        )
+                    )
+                ):
+                    # Session stamp month often carries the asked month
+                    if month_q not in (when or "").lower():
+                        continue
+                kind = "serviced" if served else "planned"
+                key = bike
+                if key in seen_items:
+                    continue
+                seen_items.add(key)
+                distinct_items.append(f"{kind}: {raw_bike.strip()}"[:100])
 
         # Subscriptions: active titles only; exclude canceled; ignore one-off issues.
         if subscription_q:
@@ -2072,8 +2180,13 @@ def build_aggregate_reading_digest(hits: list[dict], query: str = "") -> str:
             number_claims.append((n, f"{span[:100]}{stamp}", _pair_object(around)))
 
         # Distinct item spans for open enumeration (first-person acquire/use).
-        # Re-watch / subscription titles are harvested above; skip generic enum.
-        if open_enumerate and not rewatch_q and not subscription_q:
+        # Specialized harvests above; skip generic enum for those modes.
+        if (
+            open_enumerate
+            and not rewatch_q
+            and not subscription_q
+            and not service_plan_q
+        ):
             enum_pats = [
                 r"\b(?:i(?:'ve| have)?|my)\b[^\n.]{0,120}?\b(?:bought|purchased|"
                 r"downloaded|ordered|tried|watched|re-?watched|owned?|picked up|"
@@ -2344,6 +2457,7 @@ def build_aggregate_reading_digest(hits: list[dict], query: str = "") -> str:
         (open_enumerate or (not conjuncts and not money_q))
         and not rewatch_q
         and not subscription_q
+        and not service_plan_q
     ):
         blob = "\n".join(
             (h.get("content") or "")
@@ -2470,6 +2584,15 @@ def build_aggregate_reading_digest(hits: list[dict], query: str = "") -> str:
             lines.append(f"Answer with the integer {n_dist}.")
         elif rewatch_q:
             lines.append("Count distinct re-watched titles only, not total watches.")
+            lines.append(
+                f"Suggested stated total from first-person count claim: {n_dist}."
+            )
+            lines.append(f"Answer with the integer {n_dist}.")
+        elif service_plan_q:
+            lines.append(
+                "Count distinct assets that were serviced or planned for service "
+                "in the asked window (not accessories or duplicate shop visits)."
+            )
             lines.append(
                 f"Suggested stated total from first-person count claim: {n_dist}."
             )

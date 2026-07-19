@@ -582,6 +582,57 @@ def test_activity_sum_and_temporal_ago_digest():
     assert "question_date" in sd or "baking" in sd.lower()
 
 
+def test_service_plan_bike_count():
+    from openstinger.temporal.search_utils import (
+        build_aggregate_reading_digest,
+        is_service_plan_count_query,
+        is_topic_inventory_query,
+    )
+
+    q = "How many bikes did I service or plan to service in March?"
+    assert is_service_plan_count_query(q)
+    assert not is_topic_inventory_query(q)
+    hits = [
+        {
+            "source_description": "b1",
+            "valid_at_human": "2023/03/20",
+            "content": (
+                "user: I need a new tire for my commuter bike. I think it is "
+                "time to replace it this month, before April comes."
+            ),
+        },
+        {
+            "source_description": "b2",
+            "valid_at_human": "2023/03/20",
+            "content": (
+                "user: My road bike has been running great since I cleaned and "
+                "lubricated the chain on March 2nd."
+            ),
+        },
+        {
+            "source_description": "b3",
+            "valid_at_human": "2023/03/20",
+            "content": (
+                "user: I'm looking forward to the ride after getting my road "
+                "bike serviced at Pedal Power on March 10th."
+            ),
+        },
+        {
+            "source_description": "b4",
+            "valid_at_human": "2023/03/20",
+            "content": (
+                "user: I got a water bottle cage for my mountain bike a few "
+                "weeks ago."
+            ),
+        },
+    ]
+    d = build_aggregate_reading_digest(hits, q)
+    assert "Suggested distinct item count: 2" in d
+    assert "Suggested stated total from first-person count claim: 2" in d
+    assert "commuter" in d.lower()
+    assert "road" in d.lower()
+
+
 def test_subscription_count_skips_canceled():
     from openstinger.temporal.search_utils import (
         build_aggregate_reading_digest,
