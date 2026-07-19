@@ -561,6 +561,15 @@ def is_rewatch_count_query(query: str) -> bool:
     )
 
 
+def is_subscription_count_query(query: str) -> bool:
+    """How many magazine/publication subscriptions (active), not issues bought."""
+    q = query or ""
+    return bool(
+        re.search(r"\bhow many\b", q, re.I)
+        and re.search(r"\bsubscriptions?\b", q, re.I)
+    )
+
+
 def content_has_preference_cues(content: str) -> bool:
     return bool(_PREF_CUE_RE.search(content or ""))
 
@@ -1773,6 +1782,8 @@ def build_aggregate_reading_digest(hits: list[dict], query: str = "") -> str:
     )
     open_enumerate = bool(re.search(r"\bhow many\b", ql)) and not conjuncts
     rewatch_q = is_rewatch_count_query(query)
+    subscription_q = is_subscription_count_query(query)
+    canceled_subs: set[str] = set()
     # Acquire/re-watch questions: allow hyponym objects when the session is already
     # on-topic (matched query nouns) but the span uses acquire verbs without
     # repeating the head noun ("brought home a monstera" for plants).
@@ -1868,11 +1879,19 @@ def build_aggregate_reading_digest(hits: list[dict], query: str = "") -> str:
             and bool(_ACQUIRE_VERB_RE.search(cl))
             and bool(re.search(r"\b(?:i|i've|i am|i'm|my)\b", cl, re.I))
         )
+        sub_hit = subscription_q and bool(
+            re.search(
+                r"\b(?:subscription|subscribed|canceled|cancelled|getting)\b",
+                cl,
+                re.I,
+            )
+        )
         if (
             not matched
             and not (conjuncts and any(soft_contains(cl, c) for c in conjuncts))
             and not action_hit
             and not hyponym_acquire
+            and not sub_hit
         ):
             continue
         sid = (h.get("source_description") or h.get("uuid") or "?").strip()
@@ -1885,6 +1904,74 @@ def build_aggregate_reading_digest(hits: list[dict], query: str = "") -> str:
 
         user_chunks = re.findall(r"(?im)^(?:user|human)\s*:\s*(.+)$", content)
         scan = "\n".join(user_chunks) if user_chunks else content
+
+        # Subscriptions: active titles only; exclude canceled; ignore one-off issues.
+        if subscription_q:
+            for m in re.finditer(
+                r"\b(?:canceled|cancelled)\s+(?:my\s+)?"
+                r"([A-Z][A-Za-z0-9 .'&-]{2,40}?)\s+"
+                r"(?:magazine\s+)?subscriptions?\b",
+                scan,
+            ):
+                canceled_subs.add(m.group(1).strip().lower())
+            for m in re.finditer(
+                r"\bsubscription\s+to\s+([A-Z][A-Za-z0-9 .'&-]{2,50}?)"
+                r"(?=\s+magazine\b|\s*,|\s+which\b|\s+in\b|\.|$)"
+                r"|\bsubscribed\s+to\s+([A-Z][A-Za-z0-9 .'&-]{2,50}?)"
+                r"(?=\s+magazine\b|\s*,|\s+which\b|\s+in\b|\.|$)"
+                r"|\b(?:getting|receive|receiving)\s+"
+                r"([A-Z][A-Za-z0-9 .'&-]{2,50}?)"
+                r"(?=\s*,|\s+which\b|\s+for\b|\.|$)",
+                scan,
+            ):
+                title = next((g for g in m.groups() if g), None)
+                if not title:
+                    continue
+                title = title.strip().rstrip(" .,")
+                # "getting Architectural Digest" / skip generic "other publications"
+                if title.lower() in {
+                    "other publications",
+                    "publications",
+                    "magazines",
+                    "magazine",
+                }:
+                    continue
+                key = title.lower()
+                if key in canceled_subs or key in seen_items:
+                    continue
+                # One-off issue buys are not subscriptions
+                if re.search(
+                    r"\b(?:bought|buying|last)\b[^\n.]{0,40}\b"
+                    + re.escape(title.split()[0]),
+                    scan,
+                    re.I,
+                ) and not re.search(
+                    r"\b(?:subscription|subscribed|getting)\b[^\n.]{0,40}\b"
+                    + re.escape(title.split()[0]),
+                    scan,
+                    re.I,
+                ):
+                    continue
+                seen_items.add(key)
+                distinct_items.append(f"subscription: {title}"[:100])
+            # "enjoying other publications like The New Yorker, which I subscribed"
+            for m in re.finditer(
+                r"\blike\s+([A-Z][A-Za-z0-9 .'&-]{2,50}?)"
+                r"(?=\s*,|\s+which\b|\s+magazine\b)",
+                scan,
+            ):
+                if not re.search(
+                    r"\b(?:subscribed|subscription|enjoying)\b",
+                    scan[max(0, m.start() - 80) : m.end() + 80],
+                    re.I,
+                ):
+                    continue
+                title = m.group(1).strip().rstrip(" .,")
+                key = title.lower()
+                if key in canceled_subs or key in seen_items:
+                    continue
+                seen_items.add(key)
+                distinct_items.append(f"subscription: {title}"[:100])
 
         # Re-watch counts: enumerate titled re-watches only (not "watched N movies").
         if rewatch_q:
@@ -1985,8 +2072,8 @@ def build_aggregate_reading_digest(hits: list[dict], query: str = "") -> str:
             number_claims.append((n, f"{span[:100]}{stamp}", _pair_object(around)))
 
         # Distinct item spans for open enumeration (first-person acquire/use).
-        # Re-watch titles are harvested above; skip generic acquire enum there.
-        if open_enumerate and not rewatch_q:
+        # Re-watch / subscription titles are harvested above; skip generic enum.
+        if open_enumerate and not rewatch_q and not subscription_q:
             enum_pats = [
                 r"\b(?:i(?:'ve| have)?|my)\b[^\n.]{0,120}?\b(?:bought|purchased|"
                 r"downloaded|ordered|tried|watched|re-?watched|owned?|picked up|"
@@ -2253,7 +2340,11 @@ def build_aggregate_reading_digest(hits: list[dict], query: str = "") -> str:
     # Re-watch questions must NOT use plain "watched N" / "one of the four" totals.
     stated_ranked: list[tuple[int, int]] = []  # (specificity, n)
     adjacent_ns: list[int] = []
-    if (open_enumerate or (not conjuncts and not money_q)) and not rewatch_q:
+    if (
+        (open_enumerate or (not conjuncts and not money_q))
+        and not rewatch_q
+        and not subscription_q
+    ):
         blob = "\n".join(
             (h.get("content") or "")
             for h in hits

@@ -582,6 +582,45 @@ def test_activity_sum_and_temporal_ago_digest():
     assert "question_date" in sd or "baking" in sd.lower()
 
 
+def test_subscription_count_skips_canceled():
+    from openstinger.temporal.search_utils import (
+        build_aggregate_reading_digest,
+        is_subscription_count_query,
+    )
+
+    q = "How many magazine subscriptions do I currently have?"
+    assert is_subscription_count_query(q)
+    hits = [
+        {
+            "source_description": "s1",
+            "content": (
+                "user: I just canceled my Forbes magazine subscription in early "
+                "March, but I've been enjoying other publications like The New "
+                "Yorker, which I subscribed to in early February."
+            ),
+        },
+        {
+            "source_description": "s2",
+            "content": (
+                "user: I'm also getting Architectural Digest, which I love for "
+                "home decor inspiration."
+            ),
+        },
+        {
+            "source_description": "s3",
+            "content": (
+                "user: I remember buying my last National Geographic issue on "
+                "my way back from the gym."
+            ),
+        },
+    ]
+    d = build_aggregate_reading_digest(hits, q)
+    assert "Suggested distinct item count: 2" in d
+    assert "New Yorker" in d
+    assert "Architectural Digest" in d
+    assert "Forbes" not in d.split("Candidate distinct")[-1]
+
+
 def test_rewatch_count_prefers_titles_not_watched_n():
     from openstinger.temporal.search_utils import (
         build_aggregate_reading_digest,
