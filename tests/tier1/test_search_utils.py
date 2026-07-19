@@ -649,7 +649,7 @@ def test_rewatch_count_prefers_titles_not_watched_n():
     ]
     d = build_aggregate_reading_digest(hits, q)
     assert "Suggested distinct item count: 2" in d
-    assert "Suggested stated total from first-person count claim:" not in d
+    assert "Suggested stated total from first-person count claim: 2" in d
     assert "Avengers: Endgame" in d
     assert "Spider-Man: No Way Home" in d
 

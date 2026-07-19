@@ -2447,22 +2447,38 @@ def build_aggregate_reading_digest(hits: list[dict], query: str = "") -> str:
             "enumerating every nearby mention."
         )
     elif open_enumerate and distinct_items:
+        n_dist = len(distinct_items[:10])
         lines.append(
             "Candidate distinct items (dedupe across sessions): "
             + "; ".join(distinct_items[:10])
         )
-        lines.append(
-            f"Suggested distinct item count: {len(distinct_items[:10])}."
-        )
+        lines.append(f"Suggested distinct item count: {n_dist}.")
         if re.search(r"\bincluding\b", ql):
             lines.append(
                 "Question says including: count every listed on-topic item "
                 "(including gifted/set-up/for-someone-else), not only personal buys."
             )
-        lines.append(
-            f"Answer with the integer {len(distinct_items[:10])} plus short names "
-            "when helpful. Count distinct items, do not sum every number in memory."
-        )
+        if subscription_q:
+            lines.append(
+                "Count active subscriptions only; ignore canceled titles and "
+                "one-off single issues."
+            )
+            # Strong form so answer packing can overwrite a wrong bare integer.
+            lines.append(
+                f"Suggested stated total from first-person count claim: {n_dist}."
+            )
+            lines.append(f"Answer with the integer {n_dist}.")
+        elif rewatch_q:
+            lines.append("Count distinct re-watched titles only, not total watches.")
+            lines.append(
+                f"Suggested stated total from first-person count claim: {n_dist}."
+            )
+            lines.append(f"Answer with the integer {n_dist}.")
+        else:
+            lines.append(
+                f"Answer with the integer {n_dist} plus short names "
+                "when helpful. Count distinct items, do not sum every number in memory."
+            )
     elif session_hits >= 2 and not money_q and not number_claims:
         lines.append(
             "On-topic sessions are listed above. Enumerate matching items, then answer "
