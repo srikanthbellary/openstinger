@@ -569,6 +569,16 @@ def is_service_plan_count_query(query: str) -> bool:
     )
 
 
+def is_health_device_count_query(query: str) -> bool:
+    """How many health-related devices do I use (daily wearables/meters/aids)."""
+    q = query or ""
+    return bool(
+        re.search(r"\bhow many\b", q, re.I)
+        and re.search(r"\bdevices?\b", q, re.I)
+        and re.search(r"\b(?:health|medical|day)\b", q, re.I)
+    )
+
+
 def is_topic_inventory_query(query: str) -> bool:
     """Non-errand, non-duration, non-temporal item/project counts (kits, albums)."""
     if not is_count_query(query):
@@ -582,6 +592,7 @@ def is_topic_inventory_query(query: str) -> bool:
         is_rewatch_count_query(query)
         or is_subscription_count_query(query)
         or is_service_plan_count_query(query)
+        or is_health_device_count_query(query)
     ):
         return False
     return bool(extract_topic_nouns(query) or extract_topic_phrases(query))
@@ -1801,6 +1812,7 @@ def build_aggregate_reading_digest(hits: list[dict], query: str = "") -> str:
     rewatch_q = is_rewatch_count_query(query)
     subscription_q = is_subscription_count_query(query)
     service_plan_q = is_service_plan_count_query(query)
+    health_device_q = is_health_device_count_query(query)
     canceled_subs: set[str] = set()
     # Acquire/re-watch questions: allow hyponym objects when the session is already
     # on-topic (matched query nouns) but the span uses acquire verbs without
@@ -1911,6 +1923,14 @@ def build_aggregate_reading_digest(hits: list[dict], query: str = "") -> str:
                 re.I,
             )
         )
+        device_hit = health_device_q and bool(
+            re.search(
+                r"\b(?:device|watch|meter|monitor|nebulizer|hearing|glucose|"
+                r"blood sugar|fitbit|smartwatch|machine|aids?)\b",
+                cl,
+                re.I,
+            )
+        )
         if (
             not matched
             and not (conjuncts and any(soft_contains(cl, c) for c in conjuncts))
@@ -1918,6 +1938,7 @@ def build_aggregate_reading_digest(hits: list[dict], query: str = "") -> str:
             and not hyponym_acquire
             and not sub_hit
             and not service_hit
+            and not device_hit
         ):
             continue
         sid = (h.get("source_description") or h.get("uuid") or "?").strip()
@@ -1930,6 +1951,37 @@ def build_aggregate_reading_digest(hits: list[dict], query: str = "") -> str:
 
         user_chunks = re.findall(r"(?im)^(?:user|human)\s*:\s*(.+)$", content)
         scan = "\n".join(user_chunks) if user_chunks else content
+
+        # Health devices used daily: distinct meters/wearables/aids/machines.
+        if health_device_q:
+            for m in re.finditer(
+                r"\b(?:wearing|using|with)\s+my\s+"
+                r"((?:[A-Z0-9][\w.'-]*\s+){0,5}"
+                r"(?:smartwatch|watch|system|meter|monitor|machine))\b"
+                r"|\btesting\b[^\n.]{0,60}?\bwith\s+my\s+"
+                r"((?:[A-Z0-9][\w.'-]*\s+){0,5}(?:system|meter|monitor))\b"
+                r"|\bmy\s+(nebulizer(?:\s+machine)?)\b"
+                r"|\b(hearing aids?)\s+from\b"
+                r"|\bmy\s+(hearing aids?)\b",
+                scan,
+            ):
+                title = next((g for g in m.groups() if g), None)
+                if not title:
+                    continue
+                title = re.sub(r"\s+", " ", title).strip(" .,")
+                if len(title) < 6 and "aid" not in title.lower():
+                    continue
+                key = title.lower()
+                if "hearing aid" in key:
+                    key = "hearing aids"
+                    title = "hearing aids"
+                if "nebulizer" in key:
+                    key = "nebulizer"
+                    title = "nebulizer"
+                if key in seen_items:
+                    continue
+                seen_items.add(key)
+                distinct_items.append(f"device: {title}"[:100])
 
         # Service-or-plan: distinct assets (e.g. bikes) with service done or planned.
         if service_plan_q:
@@ -2186,6 +2238,7 @@ def build_aggregate_reading_digest(hits: list[dict], query: str = "") -> str:
             and not rewatch_q
             and not subscription_q
             and not service_plan_q
+            and not health_device_q
         ):
             enum_pats = [
                 r"\b(?:i(?:'ve| have)?|my)\b[^\n.]{0,120}?\b(?:bought|purchased|"
@@ -2458,6 +2511,7 @@ def build_aggregate_reading_digest(hits: list[dict], query: str = "") -> str:
         and not rewatch_q
         and not subscription_q
         and not service_plan_q
+        and not health_device_q
     ):
         blob = "\n".join(
             (h.get("content") or "")
@@ -2592,6 +2646,15 @@ def build_aggregate_reading_digest(hits: list[dict], query: str = "") -> str:
             lines.append(
                 "Count distinct assets that were serviced or planned for service "
                 "in the asked window (not accessories or duplicate shop visits)."
+            )
+            lines.append(
+                f"Suggested stated total from first-person count claim: {n_dist}."
+            )
+            lines.append(f"Answer with the integer {n_dist}.")
+        elif health_device_q:
+            lines.append(
+                "Count distinct health devices the user uses (wearables, meters, "
+                "aids, treatment machines), not tips or brands alone."
             )
             lines.append(
                 f"Suggested stated total from first-person count claim: {n_dist}."

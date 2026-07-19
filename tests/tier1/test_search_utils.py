@@ -582,6 +582,47 @@ def test_activity_sum_and_temporal_ago_digest():
     assert "question_date" in sd or "baking" in sd.lower()
 
 
+def test_health_device_daily_count():
+    from openstinger.temporal.search_utils import (
+        build_aggregate_reading_digest,
+        is_health_device_count_query,
+    )
+
+    q = "How many health-related devices do I use in a day?"
+    assert is_health_device_count_query(q)
+    hits = [
+        {
+            "source_description": "d1",
+            "content": (
+                "user: I've been wearing my Fitbit Versa 3 smartwatch non-stop."
+            ),
+        },
+        {
+            "source_description": "d2",
+            "content": (
+                "user: I have hearing aids from Phonak, and I use them daily."
+            ),
+        },
+        {
+            "source_description": "d3",
+            "content": (
+                "user: I've been testing my blood sugar with my Accu-Chek "
+                "Aviva Nano system three times a day."
+            ),
+        },
+        {
+            "source_description": "d4",
+            "content": (
+                "user: I've been doing inhalation treatments with my nebulizer "
+                "machine twice a day."
+            ),
+        },
+    ]
+    d = build_aggregate_reading_digest(hits, q)
+    assert "Suggested distinct item count: 4" in d
+    assert "Suggested stated total from first-person count claim: 4" in d
+
+
 def test_service_plan_bike_count():
     from openstinger.temporal.search_utils import (
         build_aggregate_reading_digest,
