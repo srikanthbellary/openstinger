@@ -29,20 +29,21 @@ Built on [FalkorDB](https://falkordb.com) (bi-temporal graph + vector) and [Post
 
 ### LongMemEval (fair path)
 
-Publishable suite claim: **80.4%** on LongMemEval-S (500Q), fair lite ingest (no retain, no LLM rerank, no chunk/event atoms). Answer model: DeepSeek V4 Pro. Judge: DeepSeek V3.2. Run folder: `fair_c3_500_20260718_1133/`.
+Publishable suite claim: **81.0%** (405/500) on LongMemEval-S, fair lite ingest (no retain, no LLM rerank, no chunk/event atoms). Answer model: DeepSeek V4 Pro (Novita). Judge: DeepSeek V3.2. Archive: `fair_c4_500_20260720_1802/`. Prior claim: 80.4% (`fair_c3_500`).
 
-LongMemEval scores each question by **type**. Current fair suite accuracy:
+Accuracy when Recall@5 &gt; 0: **83.15%**. When Recall@5 = 0: **58.14%**.
 
 | Type | What it tests | Acc | n |
 |------|----------------|----:|--:|
-| `single-session-assistant` | Find a fact the assistant said in one session | 92.9% | 56 |
+| Overall | Full fair suite | **81.0%** | 500 |
 | `single-session-user` | Find a fact the user said in one session | 92.9% | 70 |
-| `knowledge-update` | Prefer the latest fact when older ones conflict | 91.0% | 78 |
-| `single-session-preference` | Personalize from stated preferences | 80.0% | 30 |
-| `multi-session` | Combine evidence across many sessions | 72.2% | 133 |
-| `temporal-reasoning` | Dates, durations, order of events | 70.7% | 133 |
+| `knowledge-update` | Prefer the latest fact when older ones conflict | 89.7% | 78 |
+| `single-session-assistant` | Find a fact the assistant said in one session | 85.7% | 56 |
+| `multi-session` | Combine evidence across many sessions | 76.7% | 133 |
+| `temporal-reasoning` | Dates, durations, order of events | 73.7% | 133 |
+| `single-session-preference` | Personalize from stated preferences | 73.3% | 30 |
 
-Single-session recall and knowledge updates are already strong. The remaining gap is mostly **multi-session** and **temporal** (largest slices, ~133 questions each). Mid-size 100Q gates are diagnostics only; do not treat mid 87% as a suite claim. Detail: parent repo `docs/lme-status-current.md` and `docs/test-summary.md`.
+Single-session user recall and knowledge updates are strong. The remaining gap is mostly **multi-session** and **temporal** (largest slices), plus preference. Mid-size 100Q gates are diagnostics only; do not treat mid 86% as a suite claim.
 
 ## Integration Modes
 

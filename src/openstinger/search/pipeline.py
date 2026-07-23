@@ -20,9 +20,13 @@ from openstinger.temporal.search_utils import (
     apply_query_noun_boost,
     apply_recency_packaging,
     coverage_select_for_aggregate,
+    delivery_service_bridge_terms,
     diversify_by_source,
     effective_search_limit,
     harvest_sibling_terms,
+    health_device_bridge_terms,
+    tank_bridge_terms,
+    temporal_span_side_bridge_terms,
     is_aggregate_query,
     extract_query_focus_terms,
     extract_temporal_anchors,
@@ -39,7 +43,14 @@ from openstinger.temporal.search_utils import (
     is_preference_context_query,
     is_recommend_query,
     is_soft_advice_query,
+    is_age_delta_query,
+    age_delta_bridge_terms,
+    is_role_tenure_query,
+    is_tank_population_query,
+    is_temporal_order_query,
     is_temporal_span_query,
+    is_pairwise_first_query,
+    is_content_ago_query,
     is_topic_inventory_query,
     needs_preference_retrieval,
     package_episode_row,
@@ -49,10 +60,14 @@ from openstinger.temporal.search_utils import (
     event_attend_bridge_terms,
     fact_lookup_bridge_terms,
     build_activity_duration_digest,
+    build_content_ago_digest,
     build_expertise_digest,
     build_inventory_digest,
     build_maintenance_digest,
+    build_pairwise_first_digest,
+    build_personal_best_digest,
     build_preference_digest,
+    build_temporal_order_digest,
     build_temporal_span_digest,
     build_topic_inventory_digest,
 )
@@ -163,6 +178,21 @@ class RetrievalPipeline:
             if bridge not in terms:
                 terms.append(bridge)
         for bridge in fact_lookup_bridge_terms(query):
+            if bridge not in terms:
+                terms.append(bridge)
+        for bridge in health_device_bridge_terms(query):
+            if bridge not in terms:
+                terms.append(bridge)
+        for bridge in delivery_service_bridge_terms(query):
+            if bridge not in terms:
+                terms.append(bridge)
+        for bridge in tank_bridge_terms(query):
+            if bridge not in terms:
+                terms.append(bridge)
+        for bridge in temporal_span_side_bridge_terms(query):
+            if bridge not in terms:
+                terms.append(bridge)
+        for bridge in age_delta_bridge_terms(query):
             if bridge not in terms:
                 terms.append(bridge)
         subqueries = extract_subqueries(
@@ -473,16 +503,34 @@ class RetrievalPipeline:
         # Aggregate coverage: prefer distinct topic-matching sessions so multi-hop
         # counts are not crowded out by one chatty session (LongMemEval multi-session).
         # Pull missing parts of the same multi-session chat (…_1 …_4) by source family.
-        if is_aggregate_query(query):
+        # Order questions also split events across sibling sessions.
+        if (
+            is_aggregate_query(query)
+            or is_temporal_order_query(query)
+            or is_pairwise_first_query(query)
+            or is_content_ago_query(query)
+            or is_tank_population_query(query)
+            or is_role_tenure_query(query)
+            or is_age_delta_query(query)
+        ):
             fused_pool = await self._merge_session_family_siblings(
                 namespace, fused_pool, fetch_limit
             )
-            fused_pool = coverage_select_for_aggregate(fused_pool, query, fetch_limit)
+            if is_aggregate_query(query) or is_tank_population_query(query):
+                fused_pool = coverage_select_for_aggregate(
+                    fused_pool, query, fetch_limit
+                )
 
         boosted = (
             needs_preference_retrieval(query)
             or is_preference_context_query(query)
             or is_temporal_span_query(query)
+            or is_temporal_order_query(query)
+            or is_pairwise_first_query(query)
+            or is_content_ago_query(query)
+            or is_tank_population_query(query)
+            or is_role_tenure_query(query)
+            or is_age_delta_query(query)
             or is_aggregate_query(query)
         )
 
@@ -493,6 +541,9 @@ class RetrievalPipeline:
             or is_topic_inventory_query(query)
             or is_activity_duration_query(query)
             or is_temporal_span_query(query)
+            or is_temporal_order_query(query)
+            or is_pairwise_first_query(query)
+            or is_content_ago_query(query)
         ):
             ordered = sorted(
                 labeled,
@@ -573,6 +624,22 @@ class RetrievalPipeline:
                 span = build_temporal_span_digest(episodes, query)
                 if span:
                     digests["temporal_span"] = span
+            elif is_pairwise_first_query(query):
+                pairwise = build_pairwise_first_digest(episodes, query)
+                if pairwise:
+                    digests["pairwise_first"] = pairwise
+            elif is_temporal_order_query(query):
+                order = build_temporal_order_digest(episodes, query)
+                if order:
+                    digests["temporal_order"] = order
+            elif is_content_ago_query(query):
+                cago = build_content_ago_digest(episodes, query)
+                if cago:
+                    digests["content_ago"] = cago
+            elif re.search(r"\bpersonal best\b|\bpb\b", query or "", re.I):
+                pb = build_personal_best_digest(episodes, query)
+                if pb:
+                    digests["personal_best"] = pb
             elif is_activity_duration_query(query):
                 act = build_activity_duration_digest(episodes, query)
                 if act:
@@ -622,14 +689,31 @@ class RetrievalPipeline:
         self, namespace, terms, subqueries, fetch_limit, after_unix, before_unix, time_params
     ):
         engine = self.engine
-        contain_terms = list(
-            dict.fromkeys(terms + [t for sq in subqueries[1:] for t in extract_search_terms(sq)])
-        )
+        contain_terms: list[str] = []
+        seen_ct: set[str] = set()
+
+        def _add_ct(t: str) -> None:
+            t = (t or "").strip()
+            key = t.lower()
+            if len(t) < 3 or key in seen_ct:
+                return
+            seen_ct.add(key)
+            contain_terms.append(t)
+
+        for t in terms:
+            _add_ct(t)
+        for sq in subqueries[1:]:
+            # Keep multi-word bridges intact ("uber eats"); also add tokens.
+            if " " in (sq or "").strip():
+                _add_ct(sq)
+            for t in extract_search_terms(sq):
+                _add_ct(t)
         if not contain_terms:
             return []
         scores: dict[str, float] = {}
         payloads: dict[str, dict] = {}
-        for kw in sorted(set(contain_terms), key=lambda w: (-len(w), w))[:12]:
+        # Prefer longer phrases so inventory bridges are not crowded out.
+        for kw in sorted(set(contain_terms), key=lambda w: (-len(w), w))[:16]:
             try:
                 # Multi-word phrases need a wide scan: CONTAINS has no relevance
                 # order. Do not ORDER BY time (that drops older answer sessions).

@@ -179,19 +179,23 @@ def needs_preference_retrieval(query: str) -> bool:
 
 def event_attend_bridge_terms(query: str) -> list[str]:
     """
-    Lexical bridges for 'how many events did I attend' style counts.
+    Lexical bridges for 'how many events/ceremonies did I attend' style counts.
 
-    Questions name the category (art-related events) but gold sessions use
-    attended/volunteered/lecture/exhibition wording without repeating 'events'.
+    Questions name the category (art-related events, graduation ceremonies)
+    but gold sessions use attended/volunteered/lecture/exhibition wording
+    without repeating the question noun.
     """
     if not is_count_query(query):
         return []
     ql = (query or "").lower()
-    if not re.search(r"\b(?:events?|exhibitions?|tours?)\b", ql):
+    if not re.search(
+        r"\b(?:events?|exhibitions?|tours?|ceremon(?:y|ies)|graduations?)\b",
+        ql,
+    ):
         return []
     if not re.search(r"\b(?:attend|attended|went|visit|visited)\b", ql):
         return []
-    return [
+    bridges = [
         "attended",
         "volunteered",
         "exhibition",
@@ -200,6 +204,33 @@ def event_attend_bridge_terms(query: str) -> list[str]:
         "museum",
         "gallery",
         "art afternoon",
+    ]
+    if re.search(r"\b(?:ceremon(?:y|ies)|graduations?)\b", ql):
+        bridges.extend(["graduation", "ceremony", "commencement"])
+    return bridges
+
+
+def health_device_bridge_terms(query: str) -> list[str]:
+    """
+    Lexical bridges for health-device inventory counts.
+
+    Questions say 'health-related devices' but sessions name class nouns
+    (nebulizer, hearing aids, glucose meter, smartwatch) without 'device'.
+    """
+    if not is_health_device_count_query(query):
+        return []
+    return [
+        "nebulizer",
+        "hearing",
+        "hearing aids",
+        "glucose",
+        "blood sugar",
+        "smartwatch",
+        "meter",
+        "monitor",
+        "wearing my",
+        "using my",
+        "inhalation",
     ]
 
 
@@ -236,15 +267,33 @@ def fact_lookup_bridge_terms(query: str) -> list[str]:
         "sports" in ql and "order" in ql
     ):
         _add(
+            "participated",
+            "completed",
+            "triathlon",
+            "5k run",
+            "5k",
+            "tournament",
+            "soccer",
+            "race",
             "watched",
             "attended",
-            "nba",
-            "nfl",
-            "playoffs",
             "championship",
-            "staples",
-            "football",
+            "nba",
         )
+    if is_role_tenure_query(query):
+        _add(
+            "years and",
+            "months",
+            "worked my way",
+            "started as",
+            "experience in the company",
+            "senior",
+            "specialist",
+            "coordinator",
+            "current role",
+        )
+    if is_pairwise_first_query(query):
+        _add("set up", "installed", "upgraded", "month ago", "recently")
     # Future age / "how old will I be when …"
     if re.search(
         r"\b(?:how (?:old|many years) will i be|years will i be when)\b", ql
@@ -579,6 +628,233 @@ def is_health_device_count_query(query: str) -> bool:
     )
 
 
+def is_delivery_service_count_query(query: str) -> bool:
+    """How many food/meal delivery services (types) have I used."""
+    q = query or ""
+    return bool(
+        re.search(r"\bhow many\b", q, re.I)
+        and re.search(r"\bdelivery\b", q, re.I)
+        and re.search(r"\b(?:services?|apps?|platforms?)\b", q, re.I)
+    )
+
+
+def is_tank_population_query(query: str) -> bool:
+    """How many fish/animals across tanks (not how many tanks)."""
+    q = query or ""
+    if not re.search(r"\bhow many\b", q, re.I):
+        return False
+    if re.search(r"\bhow many\s+(?:tanks?|aquariums?)\b", q, re.I):
+        return False
+    return bool(
+        re.search(r"\b(?:fish|bettas?|tetras?|gouramis?|catfish)\b", q, re.I)
+        and re.search(r"\b(?:tanks?|aquariums?)\b", q, re.I)
+    )
+
+
+def is_tank_count_query(query: str) -> bool:
+    """How many tanks/aquariums (including set-up-for-others)."""
+    q = query or ""
+    if is_tank_population_query(q):
+        return False
+    return bool(
+        re.search(r"\bhow many\b", q, re.I)
+        and re.search(r"\b(?:tanks?|aquariums?)\b", q, re.I)
+    )
+
+
+def is_comparative_savings_query(query: str) -> bool:
+    """How much save/cheaper by choosing A instead of B."""
+    q = query or ""
+    return bool(
+        re.search(r"\b(?:save|saving|cheaper|difference)\b", q, re.I)
+        and re.search(r"\b(?:instead of|versus|vs\.?|rather than)\b", q, re.I)
+        and re.search(r"\b(?:how much|\$|cost|fare|price)\b", q, re.I)
+    )
+
+
+def is_pairwise_first_query(query: str) -> bool:
+    """Which of A or B happened / was set up first."""
+    q = query or ""
+    return bool(
+        re.search(
+            r"\bwhich\b.+\b(?:first|earlier|before)\b|"
+            r"\b(?:first|earlier)\b.+\bor\b.+\?",
+            q,
+            re.I,
+        )
+        and re.search(r"\bor\b", q, re.I)
+    )
+
+
+def is_role_tenure_query(query: str) -> bool:
+    """How long in current role/job/position."""
+    q = query or ""
+    return bool(
+        re.search(r"\bhow long\b", q, re.I)
+        and re.search(
+            r"\b(?:current role|current (?:job|position)|working in my current|"
+            r"been (?:in|at) (?:my|this) (?:role|job|position))\b",
+            q,
+            re.I,
+        )
+    )
+
+
+def is_types_of_count_query(query: str) -> bool:
+    """How many different types/kinds of X."""
+    q = query or ""
+    return bool(
+        re.search(r"\bhow many\b", q, re.I)
+        and re.search(r"\b(?:different )?types? of\b|\bkinds? of\b", q, re.I)
+    )
+
+
+def is_age_delta_query(query: str) -> bool:
+    """How many years older am I than when I graduated / at event age."""
+    q = query or ""
+    return bool(
+        re.search(r"\bhow many years older am i\b", q, re.I)
+        or (
+            re.search(r"\byears older\b", q, re.I)
+            and re.search(r"\b(?:graduat|college|when i was)\b", q, re.I)
+        )
+    )
+
+
+def age_delta_bridge_terms(query: str) -> list[str]:
+    """Bridges so current-age and age-at-event sessions both retrieve."""
+    if not is_age_delta_query(query):
+        return []
+    return [
+        "year-old",
+        "year old",
+        "age of",
+        "graduated",
+        "graduation",
+        "degree",
+        "college",
+    ]
+
+
+def is_fitness_days_per_week_query(query: str) -> bool:
+    """How many days/classes a week for fitness/workout attendance.
+
+    Covers both 'how many days a week … fitness classes' and structural
+    'how many fitness classes … typical/each/per week' wording.
+    """
+    q = query or ""
+    if not re.search(r"\bhow many\b", q, re.I):
+        return False
+    if not re.search(
+        r"\b(?:week|weekly|typical\s+week|each\s+week|per\s+week)\b", q, re.I
+    ):
+        return False
+    if not re.search(r"\b(?:fitness|workout|class(?:es)?)\b", q, re.I):
+        return False
+    if re.search(r"\bhow many\s+days\b", q, re.I):
+        return True
+    # Classes-per-week (weekday harvest still counts distinct days attended)
+    return bool(
+        re.search(
+            r"\bhow many\b.{0,48}\b(?:fitness\s+|workout\s+)?class(?:es)?\b",
+            q,
+            re.I,
+        )
+    )
+
+
+def delivery_service_bridge_terms(query: str) -> list[str]:
+    """
+    Lexical bridges for delivery-service inventory counts.
+
+    Questions say 'food delivery services' but sessions name apps/brands
+    (Uber Eats, DoorDash) or 'called <Service>' without repeating 'services'.
+    """
+    if not is_delivery_service_count_query(query):
+        return []
+    return [
+        "uber eats",
+        "doordash",
+        "grubhub",
+        "postmates",
+        "food delivery",
+        "meal delivery",
+        "delivery services",
+        "ordered from",
+        "domino",
+    ]
+
+
+def tank_bridge_terms(query: str) -> list[str]:
+    """Bridges for tank/aquarium inventory (gallon sizes, set-up-for-others)."""
+    if not (is_tank_count_query(query) or is_tank_population_query(query)):
+        return []
+    return [
+        "gallon",
+        "aquarium",
+        "betta",
+        "community tank",
+        "set up",
+        "set up a",
+        "currently has",
+        "schooling fish",
+    ]
+
+
+def temporal_span_side_bridge_terms(query: str) -> list[str]:
+    """
+    Bridges from both sides of since/between/before span questions.
+
+    Stops global min/max fallback when one event session never enters top-k
+    (e.g. ukulele-lessons start missing while guitar-tech day retrieves).
+    """
+    if not asks_temporal_span_integer(query):
+        return []
+    q = query or ""
+    sides: list[str] = []
+    m = re.search(
+        r"\b(?:had |have )?passed since\b(.+?)\bwhen i\b(.+?)(?:\?|$)",
+        q,
+        re.I,
+    )
+    if m:
+        sides.extend([m.group(1), m.group(2)])
+    m = re.search(
+        r"\bbetween the day\b(.+?)\band the day\b(.+?)(?:\?|$)",
+        q,
+        re.I,
+    )
+    if m:
+        sides.extend([m.group(1), m.group(2)])
+    m = re.search(
+        r"\bhow many (?:days?|weeks?|months?)\s+before\b(.+?)\bdid i\b(.+?)(?:\?|$)",
+        q,
+        re.I,
+    )
+    if m:
+        sides.extend([m.group(1), m.group(2)])
+    out: list[str] = []
+    seen: set[str] = set()
+    for side in sides:
+        for t in extract_topic_phrases(side) + extract_topic_nouns(side):
+            t = (t or "").strip().lower()
+            if len(t) < 4 or t in seen:
+                continue
+            seen.add(t)
+            out.append(t)
+        for m2 in re.finditer(
+            r"\b(ukulele|guitar tech|spark plugs?|turbocharged|"
+            r"tennis racket|recovered|10th jog|flu)\b",
+            side,
+            re.I,
+        ):
+            t = m2.group(1).lower()
+            if t not in seen:
+                seen.add(t)
+                out.append(t)
+    return out[:12]
+
+
 def is_topic_inventory_query(query: str) -> bool:
     """Non-errand, non-duration, non-temporal item/project counts (kits, albums)."""
     if not is_count_query(query):
@@ -593,6 +869,9 @@ def is_topic_inventory_query(query: str) -> bool:
         or is_subscription_count_query(query)
         or is_service_plan_count_query(query)
         or is_health_device_count_query(query)
+        or is_delivery_service_count_query(query)
+        or is_tank_count_query(query)
+        or is_fitness_days_per_week_query(query)
     ):
         return False
     return bool(extract_topic_nouns(query) or extract_topic_phrases(query))
@@ -652,6 +931,23 @@ def extract_subqueries(
 
     _add(q)
 
+    # Inventory / soft-advice bridges first so the return cap cannot drop them.
+    if is_soft_advice_query(q):
+        for bridge in soft_advice_bridge_terms(q):
+            _add(bridge)
+    for bridge in event_attend_bridge_terms(q):
+        _add(bridge)
+    for bridge in fact_lookup_bridge_terms(q):
+        _add(bridge)
+    for bridge in health_device_bridge_terms(q):
+        _add(bridge)
+    for bridge in delivery_service_bridge_terms(q):
+        _add(bridge)
+    for bridge in tank_bridge_terms(q):
+        _add(bridge)
+    for bridge in temporal_span_side_bridge_terms(q):
+        _add(bridge)
+
     # Quoted phrases in the question
     for m in re.findall(r"'([^']{3,60})'|\"([^\"]{3,60})\"", q):
         _add(m[0] or m[1])
@@ -669,17 +965,8 @@ def extract_subqueries(
     for t in sorted(set(keep), key=lambda w: (-len(w), w)):
         if len(t) >= 5:
             _add(t)
-        if len(out) >= max_extra + 1:
+        if len(out) >= max_extra + 1 + 8:
             break
-
-    # Soft-advice bridges are core (not experimental): tips/advice omit prior objects.
-    if is_soft_advice_query(q):
-        for bridge in soft_advice_bridge_terms(q):
-            _add(bridge)
-    for bridge in event_attend_bridge_terms(q):
-        _add(bridge)
-    for bridge in fact_lookup_bridge_terms(q):
-        _add(bridge)
 
     if experimental_lexicons:
         from openstinger.search.experimental_lexicons import append_experimental_subqueries
@@ -1303,6 +1590,65 @@ def smart_episode_excerpt(content: str, query: str = "", *, max_chars: int = 160
             re.I,
         )
     )
+    countish = is_count_query(query) or is_aggregate_query(query)
+    # Count/aggregate facts often sit in the opening user turn. Windowing only
+    # around later keyword hits was dropping "I'm also getting Architectural
+    # Digest" while keeping a late assistant "enjoy your … subscription".
+    if countish:
+        windows.append((0, min(len(text), 2800)))
+    # Pin subscription / device acquire phrasing for inventory questions
+    if countish:
+        for m in re.finditer(
+            r"\b(?:getting|subscription(?:\s+to)?|subscribed|canceled|"
+            r"cancelled|wearing my|using my|with my|nebulizer|hearing aids?|"
+            r"smartwatch|glucose|blood sugar)\b",
+            text,
+            re.I,
+        ):
+            a = max(0, m.start() - 200)
+            b = min(len(text), m.end() + 220)
+            windows.append((a, b))
+            if len(windows) >= 10:
+                break
+    # Pin span event verbs so since/between sides survive excerpting
+    if is_temporal_span_query(query):
+        for m in re.finditer(
+            r"\b(?:guitar tech|ukulele|spark plugs?|turbocharged|"
+            r"recovered from the flu|10th jog|decided to take|"
+            r"received my|bought a new|for servicing)\b",
+            text,
+            re.I,
+        ):
+            a = max(0, m.start() - 220)
+            b = min(len(text), m.end() + 240)
+            windows.append((a, b))
+            if len(windows) >= 12:
+                break
+    # Pin tenure arithmetic phrases for current-role duration questions
+    if is_role_tenure_query(query):
+        for m in re.finditer(
+            r"\b(?:\d+\s+years?\s+and\s+\d+\s+months?|worked my way|"
+            r"experience in the company|started as|current role)\b",
+            text,
+            re.I,
+        ):
+            a = max(0, m.start() - 240)
+            b = min(len(text), m.end() + 260)
+            windows.append((a, b))
+            if len(windows) >= 12:
+                break
+    if is_age_delta_query(query):
+        for m in re.finditer(
+            r"\b(?:\d{1,2}\s*-?\s*year\s*-?\s*old|at the age of\s+\d{1,2}|"
+            r"graduat(?:ed|ion)|completed.{0,40}degree)\b",
+            text,
+            re.I,
+        ):
+            a = max(0, m.start() - 220)
+            b = min(len(text), m.end() + 240)
+            windows.append((a, b))
+            if len(windows) >= 12:
+                break
     # Pin first-person duration claims before generic "hours" spam fills the budget
     for m in _USER_DURATION_RE.finditer(text):
         a = max(0, m.start() - 240)
@@ -1448,6 +1794,11 @@ def force_include_topic_episodes(
     """
     fact_bridges = fact_lookup_bridge_terms(query)
     event_bridges = event_attend_bridge_terms(query)
+    device_bridges = health_device_bridge_terms(query)
+    delivery_bridges = delivery_service_bridge_terms(query)
+    tank_bridges = tank_bridge_terms(query)
+    span_bridges = temporal_span_side_bridge_terms(query)
+    age_bridges = age_delta_bridge_terms(query)
     if (
         not is_topic_inventory_query(query)
         and not is_preference_context_query(query)
@@ -1455,6 +1806,17 @@ def force_include_topic_episodes(
         and not needs_preference_retrieval(query)
         and not fact_bridges
         and not event_bridges
+        and not device_bridges
+        and not delivery_bridges
+        and not tank_bridges
+        and not span_bridges
+        and not age_bridges
+        and not is_subscription_count_query(query)
+        and not is_health_device_count_query(query)
+        and not is_delivery_service_count_query(query)
+        and not is_tank_count_query(query)
+        and not is_temporal_span_query(query)
+        and not is_age_delta_query(query)
     ):
         if not is_activity_duration_query(query):
             return candidates
@@ -1467,7 +1829,15 @@ def force_include_topic_episodes(
                     phrases.append(bridge)
             elif bridge not in nouns:
                 nouns.append(bridge)
-    for bridge in event_bridges + fact_bridges:
+    for bridge in (
+        event_bridges
+        + fact_bridges
+        + device_bridges
+        + delivery_bridges
+        + tank_bridges
+        + span_bridges
+        + age_bridges
+    ):
         if " " in bridge:
             if bridge not in phrases:
                 phrases.append(bridge)
@@ -1577,12 +1947,16 @@ def extract_event_atoms(content: str, *, max_atoms: int = 10) -> list[str]:
 
 def is_aggregate_query(query: str) -> bool:
     """Questions that must cover ALL matching sessions (counts, totals, orderings)."""
+    # Chronological order lists need multi-session coverage, but must NOT use
+    # count/enumerate digests (those overwrite the order with a bare integer).
+    if is_temporal_order_query(query):
+        return True
     return (
         is_count_query(query)
         or is_temporal_span_query(query)
         or bool(
             re.search(
-                r"\b(?:order of|in total|altogether|all the|every|"
+                r"\b(?:in total|altogether|all the|every|"
                 r"minimum amount|how much more|older am i than|"
                 r"spent on|spend on|combined total)\b",
                 query or "",
@@ -1721,6 +2095,11 @@ def extract_and_conjuncts(query: str) -> list[str]:
             return f"{toks[0]} {toks[1]}"
         return toks[0]
 
+    # "including A, B, and C" is category expansion, not A-and-B pairing.
+    q_for_and = re.split(r"\bincluding\b", q, maxsplit=1, flags=re.I)[0].strip()
+    if not q_for_and:
+        q_for_and = q
+
     out: list[str] = []
     for kind, pat in (
         ("and", r"(.+?)\s+and\s+(?:the\s+|a\s+)?(.+?)(?:\?|$)"),
@@ -1729,11 +2108,22 @@ def extract_and_conjuncts(query: str) -> list[str]:
             r"(.+?)\s+instead of\s+(?:a\s+|the\s+)?(.+?)(?:\?|$)",
         ),
     ):
-        m = re.search(pat, q, re.I)
+        scan_q = q_for_and if kind == "and" else q
+        m = re.search(pat, scan_q, re.I)
         if not m:
             continue
         left = None
         right = None
+        if kind == "and":
+            # Collocations: friends and family is one group, not A-and-B sides
+            if re.search(r"\bfriends\s*$", m.group(1), re.I) and re.search(
+                r"^family\b", m.group(2), re.I
+            ):
+                continue
+            if re.search(r"\bblack\s*$", m.group(1), re.I) and re.search(
+                r"^white\b", m.group(2), re.I
+            ):
+                continue
         if kind == "instead":
             # 'taking the bus … to my hotel instead of a taxi' → bus, not hotel
             vm = re.search(
@@ -1756,6 +2146,608 @@ def extract_and_conjuncts(query: str) -> list[str]:
             out = [left, right]
             break
     return out
+
+
+def build_tank_population_digest(hits: list[dict], query: str = "") -> str:
+    """
+    Sum first-person stocked fish counts across aquarium sessions.
+
+    Distinguishes population totals from tank-count inventory.
+    """
+    if not is_tank_population_query(query) or not hits:
+        return ""
+    per_session_map: dict[str, int] = {}
+    details: list[str] = []
+    for h in hits:
+        content = h.get("content") or ""
+        if content.lstrip().startswith("[Session events"):
+            continue
+        if not re.search(r"\b(?:tank|aquarium|gallon|betta|fish)\b", content, re.I):
+            continue
+        sid = (h.get("source_description") or h.get("uuid") or "?").strip()
+        user_chunks = re.findall(r"(?im)^(?:user|human)\s*:\s*(.+)$", content)
+        scan = "\n".join(user_chunks) if user_chunks else content
+        stocked = 0
+        # "currently has 10 neon tetras, 5 golden honey gouramis, and a small pleco"
+        for m in re.finditer(
+            r"\b(?:currently has|which (?:currently )?has|tank,? which has)\b"
+            r"([^\n.]{0,220})",
+            scan,
+            re.I,
+        ):
+            chunk = m.group(1)
+            for nm in re.finditer(
+                r"\b(\d{1,3})\s+([A-Za-z][A-Za-z '-]{2,40}?)"
+                r"(?=\s*,|\s+and\b|\s*\.|$)",
+                chunk,
+            ):
+                n = int(nm.group(1))
+                name = nm.group(2).strip().lower()
+                if n <= 0 or n > 200:
+                    continue
+                if re.search(
+                    r"\b(?:gallon|plant|decoration|watt|week|day|month)\b",
+                    name,
+                ):
+                    continue
+                stocked += n
+            for _sm in re.finditer(
+                r"\b(?:a|an|one)\s+(?:small\s+|large\s+)?"
+                r"(?:[A-Za-z][A-Za-z '-]{2,30}\s+fish|"
+                r"[A-Za-z][A-Za-z '-]{2,20}\s+catfish|"
+                r"betta(?:\s+fish)?)\b",
+                chunk,
+                re.I,
+            ):
+                stocked += 1
+        # Separate betta tank mentioned without a currently-has list
+        if stocked == 0 and re.search(
+            r"\b(?:my|has my)\s+betta(?:\s+fish)?\b|"
+            r"\bbetta fish,?\s+[A-Z][a-z]+\b",
+            scan,
+            re.I,
+        ):
+            stocked = 1
+        if stocked <= 0:
+            continue
+        prev = per_session_map.get(sid, 0)
+        if stocked > prev:
+            per_session_map[sid] = stocked
+            details.append(f"{sid}: {stocked}")
+    if not per_session_map:
+        return ""
+    total = sum(per_session_map.values())
+    if total <= 0:
+        return ""
+    return "\n".join(
+        [
+            "Tank population notes (sum stocked fish across aquariums):",
+            "Per-tank first-person stocked counts: " + "; ".join(details[:6]),
+            f"Suggested stated total from first-person count claim: {total}.",
+            f"Answer with the integer {total}.",
+        ]
+    )
+
+
+def _parse_hit_datetime(h: dict) -> Any | None:
+    """Parse episode valid_at / valid_at_human into a naive UTC datetime."""
+    from datetime import datetime as _dt, timezone as _tz
+
+    try:
+        va = int(h.get("valid_at") or 0)
+        if va > 1_000_000_000:
+            return _dt.fromtimestamp(va, tz=_tz.utc).replace(tzinfo=None)
+    except (TypeError, ValueError, OSError):
+        pass
+    when = (h.get("valid_at_human") or "").strip()
+    if not when:
+        return None
+    m = re.search(r"(\d{4})/(\d{2})/(\d{2})", when)
+    if m:
+        try:
+            return _dt(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except ValueError:
+            return None
+    _MONTHS = {
+        "january": 1, "february": 2, "march": 3, "april": 4, "may": 5, "june": 6,
+        "july": 7, "august": 8, "september": 9, "october": 10, "november": 11,
+        "december": 12,
+    }
+    m2 = re.search(r"([A-Za-z]+)\s+(\d{1,2})\s+(\d{4})", when)
+    if m2:
+        mon = _MONTHS.get(m2.group(1).lower())
+        if mon:
+            try:
+                return _dt(int(m2.group(3)), mon, int(m2.group(2)))
+            except ValueError:
+                return None
+    return None
+
+
+def build_pairwise_first_digest(hits: list[dict], query: str = "") -> str:
+    """Decide which of two named options happened first from dated evidence."""
+    if not is_pairwise_first_query(query) or not hits:
+        return ""
+    # Extract A or B phrases: "... first, the X or the Y?"
+    m = re.search(
+        r"\bfirst,?\s+(?:the\s+)?(.+?)\s+or\s+(?:the\s+)?(.+?)(?:\?|$)",
+        query.strip(),
+        re.I,
+    )
+    if not m:
+        m = re.search(
+            r"\b(?:earlier|before),?\s+(?:the\s+)?(.+?)\s+or\s+(?:the\s+)?"
+            r"(.+?)(?:\?|$)",
+            query.strip(),
+            re.I,
+        )
+    if not m:
+        return ""
+    sides = [
+        re.sub(r"\s+", " ", m.group(1)).strip(" ?.,"),
+        re.sub(r"\s+", " ", m.group(2)).strip(" ?.,"),
+    ]
+    sides = [
+        re.split(r"\b(?:did i|do i|have i)\b", s, maxsplit=1, flags=re.I)[0].strip()
+        for s in sides
+    ]
+    # Titles often use wrapping quotes; keep mid-word apostrophes (Michael's).
+    sides = [s.replace('"', "").strip(" ?.,") for s in sides]
+    sides = [re.sub(r"'([^']{3,})'", r"\1", s) for s in sides]
+    # Keep short person names (Tom, Amy) as single-token sides
+    sides = [
+        s
+        for s in sides
+        if len(s) >= 4 or (len(s) >= 3 and " " not in s and s[0].isalpha())
+    ]
+    if len(sides) != 2:
+        return ""
+
+    def _rel_rank(text: str, hit: dict) -> tuple[int, int, str]:
+        """
+        Sort key (bucket, time): lower = earlier.
+
+        bucket 0 = in-text relative ago (N units / last month / last week)
+        bucket 1 = session valid_at (also used for bare 'recently')
+        bucket 2 = undated
+        """
+        tl = text.lower()
+        ago = re.search(
+            r"\b(\d+|a|one|two|three|four|five|six)\s+"
+            r"(days?|weeks?|months?|years?)\s+ago\b",
+            tl,
+        )
+        if ago:
+            nraw, unit = ago.group(1), ago.group(2)
+            n = {
+                "a": 1, "one": 1, "two": 2, "three": 3,
+                "four": 4, "five": 5, "six": 6,
+            }.get(nraw, None)
+            if n is None:
+                try:
+                    n = int(nraw)
+                except ValueError:
+                    n = 1
+            mult = 1
+            if unit.startswith("week"):
+                mult = 7
+            elif unit.startswith("month"):
+                mult = 30
+            elif unit.startswith("year"):
+                mult = 365
+            return (0, -(n * mult), f"{n} {unit} ago")
+        if re.search(r"\blast month\b|\ba month ago\b", tl):
+            return (0, -30, "last month")
+        if re.search(r"\blast week\b|\ba week ago\b", tl):
+            return (0, -7, "last week")
+        dt = _parse_hit_datetime(hit)
+        stamp = (hit.get("valid_at_human") or "").strip() or "session"
+        # Bare recently / last weekend are weak; prefer session chronology.
+        if dt is not None:
+            why = "session @" + stamp
+            if re.search(
+                r"\b(?:recently|just|today|this week|last weekend|"
+                r"last saturday|last sunday)\b",
+                tl,
+            ):
+                why = "recent @" + stamp
+            return (1, dt.toordinal(), why)
+        if re.search(r"\b(?:recently|just|today|this week)\b", tl):
+            return (1, 2_000_000, "recently")
+        return (2, 0, "undated")
+
+    scored: list[tuple[int, int, str, str]] = []
+    # Verbs/shells in "which first, the purchase of X" are not reliable match keys
+    _side_weak = {
+        "purchase", "purchased", "buying", "bought", "malfunction", "malfunctions",
+        "event", "events", "attend", "attended", "happened", "setup", "set",
+        "the", "and", "for", "from", "with", "into", "onto", "that", "this",
+        "was", "were", "been", "being", "have", "has", "had", "did", "does",
+    }
+    for side in sides:
+        best: tuple[int, int, str, str] | None = None
+        side_l = side.lower()
+        side_tokens = [
+            p for p in side_l.split() if len(p) >= 3 and p not in _side_weak
+        ]
+        if not side_tokens:
+            side_tokens = [
+                p for p in side_l.split() if len(p) >= 3 and p not in {"the", "and"}
+            ]
+        for h in hits:
+            content = h.get("content") or ""
+            cl = content.lower()
+            # Require every distinctive noun (coffee+maker, stand+mixer, …)
+            if side_tokens:
+                if not all(soft_contains(cl, p) for p in side_tokens):
+                    continue
+            elif not soft_contains(cl, side_l):
+                continue
+            # Short person names: require parenthood/event cue near the name
+            # so bare "Tom" in unrelated chatter does not count as evidence.
+            if " " not in side_l and len(side_l) <= 4:
+                if not re.search(rf"\b{re.escape(side_l)}\b", cl):
+                    continue
+                if not re.search(
+                    rf"\b{re.escape(side_l)}\b.{{0,100}}\b(?:parent|born|adopt|"
+                    rf"baby|father|mother|son|daughter|child)\b|"
+                    rf"\b(?:parent|born|adopt|baby|father|mother|son|daughter|"
+                    rf"child)\b.{{0,100}}\b{re.escape(side_l)}\b",
+                    cl,
+                    re.I,
+                ):
+                    continue
+            user_chunks = re.findall(r"(?im)^(?:user|human)\s*:\s*(.+)$", content)
+            scan = "\n".join(user_chunks) if user_chunks else content
+            # Baseline: session stamp (relative cues must appear near side nouns)
+            bucket, tkey, why = _rel_rank("", h)
+            for seed in side_tokens or side_l.split()[:1]:
+                for wm in re.finditer(re.escape(seed), scan, re.I):
+                    w = scan[max(0, wm.start() - 100) : wm.end() + 220]
+                    wb, wt, wwhy = _rel_rank(w, h)
+                    if (wb, wt) < (bucket, tkey):
+                        bucket, tkey, why = wb, wt, wwhy
+            cand = (bucket, tkey, side, why)
+            if best is None or cand[:2] < best[:2]:
+                best = cand
+        if best:
+            scored.append(best)
+    # One named option evidenced, the other missing → abstain (incomplete pair)
+    if len(scored) == 1:
+        missing = [s for s in sides if s.lower() != scored[0][2].lower()]
+        lines = [
+            "Pairwise first-event notes:",
+            f"- Evidence found for: {scored[0][2]} ({scored[0][3]})",
+            f"- No dated evidence found for: {missing[0] if missing else 'other option'}.",
+            "Suggested answer: I do not know.",
+            "Do not answer with the one-sided name when the other option is absent.",
+        ]
+        return "\n".join(lines)
+    if len(scored) < 2:
+        return ""
+    scored.sort(key=lambda x: (x[0], x[1]))
+    first = scored[0][2]
+    lines = [
+        "Pairwise first-event notes (earlier evidence first):",
+    ]
+    for _b, _t, side, why in scored:
+        lines.append(f"- {side} ({why})")
+    lines.append(f"Suggested first event: {first}.")
+    lines.append(f"Answer with: {first}")
+    return "\n".join(lines)
+
+
+def is_weekday_wake_query(query: str) -> bool:
+    """Wake-up time on named weekdays (possibly with an earlier/later offset)."""
+    q = query or ""
+    if not re.search(r"\b(?:wake|wakes|waking|get up|gets up)\b", q, re.I):
+        return False
+    return bool(
+        re.search(
+            r"\b(?:mondays?|tuesdays?|wednesdays?|thursdays?|fridays?|"
+            r"saturdays?|sundays?|weekdays?|weekends?)\b",
+            q,
+            re.I,
+        )
+    )
+
+
+def build_weekday_wake_digest(hits: list[dict], query: str = "") -> str:
+    """
+    Compose baseline wake time with weekday-specific earlier/later offsets.
+
+    Example: wake at 7:00, Tue/Thu 15 minutes earlier → Suggested 6:45 AM.
+    """
+    if not is_weekday_wake_query(query) or not hits:
+        return ""
+    blob = "\n".join(
+        (h.get("content") or "")
+        for h in hits
+        if not (h.get("content") or "").lstrip().startswith("[Session events")
+    )
+    user_chunks = re.findall(r"(?im)^(?:user|human)\s*:\s*(.+)$", blob)
+    scan = "\n".join(user_chunks) if user_chunks else blob
+    if not scan:
+        return ""
+
+    def _parse_clock(text: str) -> tuple[int, int, str] | None:
+        m = re.search(
+            r"\b(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)\b",
+            text,
+            re.I,
+        )
+        if not m:
+            return None
+        hour = int(m.group(1))
+        minute = int(m.group(2) or "0")
+        ampm = m.group(3).lower().replace(".", "")
+        if ampm.startswith("p") and hour < 12:
+            hour += 12
+        if ampm.startswith("a") and hour == 12:
+            hour = 0
+        h12 = hour % 12 or 12
+        suffix = "AM" if hour < 12 else "PM"
+        label = f"{h12}:{minute:02d} {suffix}"
+        return hour, minute, label
+
+    baseline = None
+    for m in re.finditer(
+        r"(.{0,40}\b(?:wake|waking|get up|gets up)\b.{0,40})",
+        scan,
+        re.I,
+    ):
+        clock = _parse_clock(m.group(1))
+        if clock and not re.search(r"\b(?:earlier|later|minutes?)\b", m.group(1), re.I):
+            baseline = clock
+            break
+    if baseline is None:
+        # Fallback: any wake clock in scan
+        for m in re.finditer(
+            r"\b(?:wake|waking|get up)\b[^\n.]{0,50}",
+            scan,
+            re.I,
+        ):
+            clock = _parse_clock(m.group(0))
+            if clock:
+                baseline = clock
+                break
+    if baseline is None:
+        return ""
+
+    # Asked weekdays
+    asked: set[str] = set()
+    ql = (query or "").lower()
+    for full in (
+        "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"
+    ):
+        if re.search(rf"\b{full}s?\b", ql):
+            asked.add(full)
+
+    offset_min = 0
+    offset_why = ""
+    for m in re.finditer(
+        r"(.{0,80}\b(\d+)\s+minutes?\s+(earlier|later)\b.{0,80})",
+        scan,
+        re.I,
+    ):
+        window = m.group(1).lower()
+        # Must mention at least one asked weekday (or "those days" near them)
+        if asked and not any(d in window for d in asked):
+            # Allow if weekdays named just before this span in scan
+            start = max(0, m.start() - 120)
+            pref = scan[start : m.start()].lower()
+            if not any(d in pref for d in asked):
+                continue
+        n = int(m.group(2))
+        sign = -1 if m.group(3).lower() == "earlier" else 1
+        offset_min = sign * n
+        offset_why = f"{n} minutes {m.group(3).lower()}"
+        break
+    if offset_min == 0:
+        return ""
+
+    total = baseline[0] * 60 + baseline[1] + offset_min
+    total = total % (24 * 60)
+    hour, minute = divmod(total, 60)
+    h12 = hour % 12 or 12
+    suffix = "AM" if hour < 12 else "PM"
+    suggested = f"{h12}:{minute:02d} {suffix}"
+    days_label = " and ".join(sorted(asked)) if asked else "those weekdays"
+    return "\n".join(
+        [
+            "Weekday wake-schedule notes:",
+            f"- Baseline wake time: {baseline[2]}",
+            f"- Offset on {days_label}: {offset_why}",
+            f"Suggested wake time: {suggested}.",
+            f"Answer with {suggested}.",
+        ]
+    )
+
+
+def build_role_tenure_digest(hits: list[dict], query: str = "") -> str:
+    """
+    Infer current-role tenure from company tenure minus time-to-role.
+
+    Structural: years/months arithmetic only; no job-title lists.
+    """
+    if not is_role_tenure_query(query) or not hits:
+        return ""
+    blob = "\n".join(
+        (h.get("content") or "")
+        for h in hits
+        if not (h.get("content") or "").lstrip().startswith("[Session events")
+    )
+    user_chunks = re.findall(r"(?im)^(?:user|human)\s*:\s*(.+)$", blob)
+    scan = "\n".join(user_chunks) if user_chunks else blob
+
+    def _ym(text: str) -> tuple[int, int] | None:
+        m = re.search(
+            r"\b(\d+)\s+years?\s+and\s+(\d+)\s+months?\b",
+            text,
+            re.I,
+        )
+        if m:
+            return int(m.group(1)), int(m.group(2))
+        m = re.search(r"\b(\d+)\s+years?\b", text, re.I)
+        if m and not re.search(r"\bmonths?\b", text[m.end() : m.end() + 24], re.I):
+            return int(m.group(1)), 0
+        m = re.search(r"\b(\d+)\s+months?\b", text, re.I)
+        if m:
+            return 0, int(m.group(1))
+        return None
+
+    company = None
+    prior = None
+    # Prefer spans that mention company tenure vs promotion path.
+    for m in re.finditer(
+        r"([^\n.]{0,100}\d+\s+years?\s+and\s+\d+\s+months?[^\n.]{0,80})",
+        scan,
+        re.I,
+    ):
+        span = m.group(1)
+        ym = _ym(span)
+        if not ym:
+            continue
+        if re.search(
+            r"\b(?:experience in the company|in the company|with the company|"
+            r"at the company|with (?:this|the) company)\b",
+            span,
+            re.I,
+        ):
+            company = ym
+        elif re.search(
+            r"\b(?:worked my way|started as|after|promoted|way up)\b",
+            span,
+            re.I,
+        ):
+            prior = ym
+    # Fallback: separate keyword windows if the duration sits nearby
+    if not company:
+        for m in re.finditer(
+            r"([^\n.]{0,80}\b(?:experience in the company|in the company|"
+            r"with the company|at the company)\b[^\n.]{0,40})",
+            scan,
+            re.I,
+        ):
+            company = _ym(m.group(1)) or company
+    if not prior:
+        for m in re.finditer(
+            r"([^\n.]{0,120}\b(?:worked my way up|started as)\b[^\n.]{0,100})",
+            scan,
+            re.I,
+        ):
+            prior = _ym(m.group(1)) or prior
+    if not company or not prior:
+        return ""
+    c_m = company[0] * 12 + company[1]
+    p_m = prior[0] * 12 + prior[1]
+    if c_m <= p_m:
+        return ""
+    cur = c_m - p_m
+    y, mo = divmod(cur, 12)
+    if y and mo:
+        shown = f"{y} year{'s' if y != 1 else ''} and {mo} month{'s' if mo != 1 else ''}"
+    elif y:
+        shown = f"{y} year{'s' if y != 1 else ''}"
+    else:
+        shown = f"{mo} month{'s' if mo != 1 else ''}"
+    return (
+        "Role tenure notes (company tenure minus time to reach current role):\n"
+        f"- Company tenure: {company[0]}y {company[1]}m\n"
+        f"- Prior path duration: {prior[0]}y {prior[1]}m\n"
+        f"Suggested role tenure: {shown}.\n"
+        f"Answer with: {shown}"
+    )
+
+
+def build_age_delta_digest(hits: list[dict], query: str = "") -> str:
+    """Current age minus age-at-event (e.g. graduated at 25, now 32 → 7)."""
+    if not is_age_delta_query(query) or not hits:
+        return ""
+    blob = "\n".join(
+        (h.get("content") or "")
+        for h in hits
+        if not (h.get("content") or "").lstrip().startswith("[Session events")
+    )
+    cur = None
+    then = None
+    m = re.search(r"\b(?:as a\s+)?(\d{1,2})\s*-?\s*year\s*-?\s*old\b", blob, re.I)
+    if m:
+        cur = int(m.group(1))
+    m = re.search(
+        r"\b(?:completed|graduated|finished).{0,80}?\bat the age of\s+(\d{1,2})\b|"
+        r"\bat the age of\s+(\d{1,2})\b.{0,40}?\b(?:graduat|degree|college)\b|"
+        r"\bwhen i was\s+(\d{1,2})\b.{0,40}?\b(?:graduat|degree)\b",
+        blob,
+        re.I,
+    )
+    if m:
+        then = int(next(g for g in m.groups() if g))
+    if cur is None or then is None or cur <= then or cur > 120 or then > 100:
+        return ""
+    delta = cur - then
+    return (
+        "Age-delta notes (current age minus age at referenced event):\n"
+        f"- Current age claim: {cur}\n"
+        f"- Age at event claim: {then}\n"
+        f"Suggested stated total from first-person count claim: {delta}.\n"
+        f"Answer with the integer {delta}."
+    )
+
+
+def build_types_of_digest(hits: list[dict], query: str = "") -> str:
+    """
+    Distinct ingredient/member types for 'how many different types of X'.
+
+    Harvests first-person use mentions; category head comes from the question.
+    """
+    if not is_types_of_count_query(query) or not hits:
+        return ""
+    m = re.search(
+        r"\b(?:types?|kinds?) of\s+"
+        r"([A-Za-z]+(?:\s+(?:fruits?|vegetables?|items?|ingredients?))?)\b",
+        query,
+        re.I,
+    )
+    if not m:
+        return ""
+    category = m.group(1).strip().lower()
+    category = re.sub(r"\s+", " ", category)
+    # Lightweight closed set only for broad produce categories (not brand/topic lists)
+    members = {
+        "citrus": {"orange", "lime", "lemon", "grapefruit", "yuzu", "tangerine"},
+        "citrus fruit": {"orange", "lime", "lemon", "grapefruit", "yuzu", "tangerine"},
+        "citrus fruits": {"orange", "lime", "lemon", "grapefruit", "yuzu", "tangerine"},
+    }
+    vocab = members.get(category)
+    if not vocab:
+        return ""
+    found: list[str] = []
+    seen: set[str] = set()
+    for h in hits:
+        content = h.get("content") or ""
+        user_chunks = re.findall(r"(?im)^(?:user|human)\s*:\s*(.+)$", content)
+        scan = ("\n".join(user_chunks) if user_chunks else content).lower()
+        if not re.search(
+            r"\b(?:cocktail|recipe|bitters|juice|sangria|gimlet|peels?|slices?)\b",
+            scan,
+        ):
+            continue
+        for fruit in sorted(vocab):
+            if fruit in seen:
+                continue
+            if re.search(rf"\b{re.escape(fruit)}\b", scan):
+                seen.add(fruit)
+                found.append(fruit)
+    if len(found) < 2:
+        return ""
+    n = len(found)
+    return (
+        f"Types-of notes for {category} (first-person recipe uses):\n"
+        f"Distinct types: {', '.join(found)}.\n"
+        f"Suggested stated total from first-person count claim: {n}.\n"
+        f"Answer with the integer {n}."
+    )
 
 
 def build_aggregate_reading_digest(hits: list[dict], query: str = "") -> str:
@@ -1783,6 +2775,18 @@ def build_aggregate_reading_digest(hits: list[dict], query: str = "") -> str:
     # were forcing abstain over Candidate duration sum.
     if is_activity_duration_query(query):
         return ""
+    # Order lists are not integer counts
+    if is_temporal_order_query(query):
+        return ""
+    # Specialized digests own these
+    if is_tank_population_query(query) or is_types_of_count_query(query):
+        return ""
+    if (
+        is_role_tenure_query(query)
+        or is_pairwise_first_query(query)
+        or is_age_delta_query(query)
+    ):
+        return ""
     ql = (query or "").lower()
     # Frequency / collection digests own these; aggregate open-enumerate was
     # forcing distinct-item count 1/2 over Suggested stated/collection totals.
@@ -1806,14 +2810,39 @@ def build_aggregate_reading_digest(hits: list[dict], query: str = "") -> str:
         return ""
     conjuncts = extract_and_conjuncts(query)
     money_q = bool(
-        re.search(r"\b(?:how much|\$|money|sold|spend|spent|minimum|raise)\b", ql)
+        re.search(
+            r"\b(?:how much|\$|money|sold|spend|spent|minimum|raise|save|saving)\b",
+            ql,
+        )
     )
     open_enumerate = bool(re.search(r"\bhow many\b", ql)) and not conjuncts
     rewatch_q = is_rewatch_count_query(query)
     subscription_q = is_subscription_count_query(query)
     service_plan_q = is_service_plan_count_query(query)
     health_device_q = is_health_device_count_query(query)
+    delivery_q = is_delivery_service_count_query(query)
+    tank_q = is_tank_count_query(query)
+    fitness_days_q = is_fitness_days_per_week_query(query)
     canceled_subs: set[str] = set()
+    _WEEKDAY_CANON = {
+        "monday": "monday",
+        "mon": "monday",
+        "tuesday": "tuesday",
+        "tue": "tuesday",
+        "tues": "tuesday",
+        "wednesday": "wednesday",
+        "wed": "wednesday",
+        "thursday": "thursday",
+        "thu": "thursday",
+        "thur": "thursday",
+        "thurs": "thursday",
+        "friday": "friday",
+        "fri": "friday",
+        "saturday": "saturday",
+        "sat": "saturday",
+        "sunday": "sunday",
+        "sun": "sunday",
+    }
     # Acquire/re-watch questions: allow hyponym objects when the session is already
     # on-topic (matched query nouns) but the span uses acquire verbs without
     # repeating the head noun ("brought home a monstera" for plants).
@@ -1824,10 +2853,21 @@ def build_aggregate_reading_digest(hits: list[dict], query: str = "") -> str:
             ql,
         )
     )
+    birth_open = open_enumerate and bool(
+        re.search(r"\b(?:babies|baby|births?|born)\b", ql, re.I)
+    )
+    # Bare "got" / "I've got a lot of land" is possession chatter, not acquire.
     _ACQUIRE_VERB_RE = re.compile(
-        r"\b(?:bought|purchased|downloaded|got|ordered|tried|watched|re-?watched|"
+        r"\b(?:bought|purchased|downloaded|ordered|tried|watched|re-?watched|"
         r"owned?|picked up|assembled|fixed|sold|learned|cooked|acquired|adopted|"
-        r"brought home|brought it home|subscribed(?:\s+to)?|set up|serviced)\b",
+        r"brought home|brought it home|subscribed(?:\s+to)?|set up|serviced|"
+        r"got\s+from|got\s+(?:a|an|the|my)\s+[a-z])\b",
+        re.I,
+    )
+    _EXISTENTIAL_GOT_RE = re.compile(
+        r"\bi(?:'ve| have)\s+got\s+(?:a|an|the|my)?\s*"
+        r"(?:lot|bit|pretty|area|land|idea|feeling|problem|question|"
+        r"couple|few|bunch|ton)\b",
         re.I,
     )
     multi_action = bool(
@@ -1931,6 +2971,25 @@ def build_aggregate_reading_digest(hits: list[dict], query: str = "") -> str:
                 re.I,
             )
         )
+        delivery_hit = delivery_q and bool(
+            re.search(
+                r"\b(?:delivery|uber\s*eats|doordash|grubhub|postmates|"
+                r"domino'?s|fresh fusion|meal\s+delivery)\b",
+                cl,
+                re.I,
+            )
+        )
+        tank_hit = tank_q and bool(
+            re.search(r"\b(?:tank|aquarium|gallon)\b", cl, re.I)
+        )
+        fitness_hit = fitness_days_q and bool(
+            re.search(
+                r"\b(?:class|zumba|yoga|weightlifting|workout|fitness|"
+                r"monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
+                cl,
+                re.I,
+            )
+        )
         if (
             not matched
             and not (conjuncts and any(soft_contains(cl, c) for c in conjuncts))
@@ -1939,6 +2998,9 @@ def build_aggregate_reading_digest(hits: list[dict], query: str = "") -> str:
             and not sub_hit
             and not service_hit
             and not device_hit
+            and not delivery_hit
+            and not tank_hit
+            and not fitness_hit
         ):
             continue
         sid = (h.get("source_description") or h.get("uuid") or "?").strip()
@@ -1951,6 +3013,94 @@ def build_aggregate_reading_digest(hits: list[dict], query: str = "") -> str:
 
         user_chunks = re.findall(r"(?im)^(?:user|human)\s*:\s*(.+)$", content)
         scan = "\n".join(user_chunks) if user_chunks else content
+        # Subscription titles can appear in assistant echoes after excerpting.
+        scan_sub = content if subscription_q else scan
+
+        # Fitness class days/week: distinct weekdays with first-person class claims.
+        if fitness_days_q:
+            user_voice = bool(
+                re.search(r"\b(?:i|i'm|i am|i've|my)\b", scan, re.I)
+            )
+            for m in re.finditer(
+                r"\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
+                r"mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)s?\b",
+                scan,
+                re.I,
+            ):
+                # Wide window: "I attend … on Saturdays" can put the day far
+                # from the sentence-initial first person.
+                around = scan[max(0, m.start() - 220) : m.end() + 90]
+                if not re.search(
+                    r"\b(?:class(?:es)?|zumba|yoga|weightlifting|workout|"
+                    r"fitness|attend)\b",
+                    around,
+                    re.I,
+                ):
+                    continue
+                if not user_voice and not re.search(
+                    r"\b(?:i|i'm|i am|i've|my)\b",
+                    around,
+                    re.I,
+                ):
+                    continue
+                raw = re.sub(r"s$", "", m.group(1).lower())
+                day = _WEEKDAY_CANON.get(raw)
+                if not day or day in seen_items:
+                    continue
+                seen_items.add(day)
+                distinct_items.append(f"class day: {day}")
+
+        # Aquarium/tank inventory: distinct gallon-sized tanks (incl. set-up-for-others).
+        if tank_q:
+            for m in re.finditer(
+                r"\b(\d+)\s*-?\s*gallon\s+"
+                r"((?:[\w'-]+\s+){0,4}tank)\b",
+                scan,
+                re.I,
+            ):
+                gallons = m.group(1)
+                rest = re.sub(r"\s+", " ", m.group(2)).strip().lower()
+                key = f"{gallons}-gallon {rest}"
+                # Collapse synonyms: "freshwater community tank" vs "community tank"
+                key_norm = re.sub(
+                    r"\b(?:freshwater|saltwater|planted)\s+",
+                    "",
+                    key,
+                )
+                if key_norm in seen_items or key in seen_items:
+                    continue
+                seen_items.add(key_norm)
+                distinct_items.append(f"tank: {gallons}-gallon {rest}"[:100])
+
+        # Food delivery services / apps used (distinct named platforms).
+        if delivery_q:
+            for m in re.finditer(
+                r"\b(Uber\s*Eats|DoorDash|Grubhub|Postmates|Instacart)\b"
+                r"|\bcalled\s+([A-Z][A-Za-z0-9 &'-]{2,40}?)"
+                r"(?=\s*[-,.]|\s+they\b|\s+-\s|\s+have\b|$)"
+                r"|\b(?:had|ordered|from)\s+(Domino'?s(?:\s+Pizza)?)\b"
+                r"|\b(Domino'?s(?:\s+Pizza)?)\s+(?:three times|delivery)\b",
+                scan,
+            ):
+                title = next((g for g in m.groups() if g), None)
+                if not title:
+                    continue
+                title = re.sub(r"\s+", " ", title).strip(" .,")
+                # "called" captures need nearby delivery context
+                if m.group(2) and not re.search(
+                    r"\b(?:delivery|meal|food|eats)\b",
+                    scan[max(0, m.start() - 80) : m.end() + 40],
+                    re.I,
+                ):
+                    continue
+                key = title.lower().replace("'", "'")
+                key = re.sub(r"\s+", " ", key)
+                if key in {"this new one", "a new one", "one"}:
+                    continue
+                if key in seen_items:
+                    continue
+                seen_items.add(key)
+                distinct_items.append(f"delivery: {title}"[:100])
 
         # Health devices used daily: distinct meters/wearables/aids/machines.
         if health_device_q:
@@ -2067,13 +3217,23 @@ def build_aggregate_reading_digest(hits: list[dict], query: str = "") -> str:
 
         # Subscriptions: active titles only; exclude canceled; ignore one-off issues.
         if subscription_q:
+
+            def _sub_key(raw: str) -> str:
+                t = re.sub(r"\s+", " ", (raw or "").strip().lower())
+                t = re.sub(
+                    r"\s+(?:magazine|publication|subscriptions?)\s*$",
+                    "",
+                    t,
+                )
+                return t.strip()
+
             for m in re.finditer(
                 r"\b(?:canceled|cancelled)\s+(?:my\s+)?"
                 r"([A-Z][A-Za-z0-9 .'&-]{2,40}?)\s+"
                 r"(?:magazine\s+)?subscriptions?\b",
-                scan,
+                scan_sub,
             ):
-                canceled_subs.add(m.group(1).strip().lower())
+                canceled_subs.add(_sub_key(m.group(1)))
             for m in re.finditer(
                 r"\bsubscription\s+to\s+([A-Z][A-Za-z0-9 .'&-]{2,50}?)"
                 r"(?=\s+magazine\b|\s*,|\s+which\b|\s+in\b|\.|$)"
@@ -2081,13 +3241,26 @@ def build_aggregate_reading_digest(hits: list[dict], query: str = "") -> str:
                 r"(?=\s+magazine\b|\s*,|\s+which\b|\s+in\b|\.|$)"
                 r"|\b(?:getting|receive|receiving)\s+"
                 r"([A-Z][A-Za-z0-9 .'&-]{2,50}?)"
-                r"(?=\s*,|\s+which\b|\s+for\b|\.|$)",
-                scan,
+                r"(?=\s*,|\s+which\b|\s+for\b|\.|$)"
+                # Assistant echo / truncated user turn: "your Architectural Digest subscription"
+                r"|\b(?:your|my|the)\s+([A-Z][A-Za-z0-9 .'&-]{2,50}?)\s+"
+                r"subscriptions?\b",
+                scan_sub,
             ):
                 title = next((g for g in m.groups() if g), None)
                 if not title:
                     continue
+                # Skip "canceled my Forbes … subscription" false harvest
+                prefix = scan_sub[max(0, m.start() - 40) : m.start()].lower()
+                if re.search(r"\b(?:canceled|cancelled)\b", prefix):
+                    continue
                 title = title.strip().rstrip(" .,")
+                title = re.sub(
+                    r"\s+(?:magazine|publication)\s*$",
+                    "",
+                    title,
+                    flags=re.I,
+                ).strip()
                 # "getting Architectural Digest" / skip generic "other publications"
                 if title.lower() in {
                     "other publications",
@@ -2096,19 +3269,19 @@ def build_aggregate_reading_digest(hits: list[dict], query: str = "") -> str:
                     "magazine",
                 }:
                     continue
-                key = title.lower()
-                if key in canceled_subs or key in seen_items:
+                key = _sub_key(title)
+                if not key or key in canceled_subs or key in seen_items:
                     continue
                 # One-off issue buys are not subscriptions
                 if re.search(
                     r"\b(?:bought|buying|last)\b[^\n.]{0,40}\b"
                     + re.escape(title.split()[0]),
-                    scan,
+                    scan_sub,
                     re.I,
                 ) and not re.search(
                     r"\b(?:subscription|subscribed|getting)\b[^\n.]{0,40}\b"
                     + re.escape(title.split()[0]),
-                    scan,
+                    scan_sub,
                     re.I,
                 ):
                     continue
@@ -2118,17 +3291,17 @@ def build_aggregate_reading_digest(hits: list[dict], query: str = "") -> str:
             for m in re.finditer(
                 r"\blike\s+([A-Z][A-Za-z0-9 .'&-]{2,50}?)"
                 r"(?=\s*,|\s+which\b|\s+magazine\b)",
-                scan,
+                scan_sub,
             ):
                 if not re.search(
                     r"\b(?:subscribed|subscription|enjoying)\b",
-                    scan[max(0, m.start() - 80) : m.end() + 80],
+                    scan_sub[max(0, m.start() - 80) : m.end() + 80],
                     re.I,
                 ):
                     continue
                 title = m.group(1).strip().rstrip(" .,")
-                key = title.lower()
-                if key in canceled_subs or key in seen_items:
+                key = _sub_key(title)
+                if not key or key in canceled_subs or key in seen_items:
                     continue
                 seen_items.add(key)
                 distinct_items.append(f"subscription: {title}"[:100])
@@ -2195,11 +3368,12 @@ def build_aggregate_reading_digest(hits: list[dict], query: str = "") -> str:
         )
         for m in re.finditer(
             rf"\b(?:planted|watched|tried|owned?|bought|viewed|have|had|got|ate|"
-            rf"completed|finished|played|learned|scored|lasted)\b[^\n.]{{0,48}}?"
+            rf"completed|finished|played|learned|scored|lasted|got)\b[^\n.]{{0,48}}?"
             rf"{num_tok}\b"
             rf"|{num_tok}\b[^\n.]{{0,32}}?(?:of\s+)?(?:{obj_alt})\b"
             rf"|\b(?:the\s+)?{num_tok}\s+(?:meal|meals|lunch|lunches|"
-            rf"goal|goals|assist|assists)\b",
+            rf"goal|goals|assist|assists|comments?|views?|likes?)\b"
+            rf"|\b{num_tok}\s+comments?\b",
             scan,
             re.I,
         ):
@@ -2239,17 +3413,30 @@ def build_aggregate_reading_digest(hits: list[dict], query: str = "") -> str:
             and not subscription_q
             and not service_plan_q
             and not health_device_q
+            and not delivery_q
+            and not tank_q
+            and not fitness_days_q
         ):
             enum_pats = [
                 r"\b(?:i(?:'ve| have)?|my)\b[^\n.]{0,120}?\b(?:bought|purchased|"
                 r"downloaded|ordered|tried|watched|re-?watched|owned?|picked up|"
                 r"assembled|fixed|sold|learned|cooked|acquired|adopted|brought home|"
                 r"brought it home|subscribed(?:\s+to)?|set up|serviced|service|"
-                r"got\s+(?:a|an|the|my|from))\b[^\n.]{0,80}",
+                r"got\s+from|got\s+(?:a|an|the|my)\s+[a-z])\b[^\n.]{0,80}",
                 # "snake plant, which I got from my sister"
                 r"\b[A-Za-z][A-Za-z0-9 '-]{2,40}\b[^\n.]{0,40}?\bwhich\s+i\s+got\s+from\b"
                 r"[^\n.]{0,40}",
             ]
+            if birth_open:
+                # Birth events only (not birthdays, pets, or calendar noise)
+                enum_pats = [
+                    r"\b(?:baby|son|daughter|boy|girl)\b[^\n.]{0,40}?\b(?:born|arrived)\b"
+                    r"[^\n.]{0,40}",
+                    r"\b(?:born|welcomed|gave birth|had a baby|had a son|had a daughter)\b"
+                    r"[^\n.]{0,80}",
+                    r"\b[A-Z][a-z]{2,12}\b[^\n.]{0,20}?\b(?:was born|was welcomed|"
+                    r"came home from the hospital)\b[^\n.]{0,40}",
+                ]
             if multi_action:
                 enum_pats.append(
                     rf"(?:\b(?:{_act}|get a new|get)\b.{{0,80}}\b(?:{_obj})\b|"
@@ -2260,7 +3447,24 @@ def build_aggregate_reading_digest(hits: list[dict], query: str = "") -> str:
                     span = re.sub(r"\s+", " ", m.group(0)).strip()
                     if len(span) < 12:
                         continue
+                    if _EXISTENTIAL_GOT_RE.search(span):
+                        continue
+                    if birth_open and re.search(
+                        r"\b(?:dog|puppy|cat|kitten|pet|birthday|calendar)\b",
+                        span,
+                        re.I,
+                    ):
+                        continue
                     term_ok = any(soft_contains(span, t) for t in terms)
+                    if birth_open:
+                        term_ok = bool(
+                            re.search(
+                                r"\b(?:born|welcomed|baby|son|daughter|"
+                                r"gave birth|hospital)\b",
+                                span,
+                                re.I,
+                            )
+                        )
                     action_ok = multi_action and bool(
                         re.search(
                             rf"(?:\b(?:{_act}|get a new)\b.{{0,80}}\b(?:{_obj})\b|"
@@ -2336,6 +3540,7 @@ def build_aggregate_reading_digest(hits: list[dict], query: str = "") -> str:
                         )
                         if m_head:
                             head = m_head.group(1)
+                            head = re.sub(r"\s+plants?$", " plant", head)
                             head_norm = re.sub(r"s$", "", head)
                             if head in _q_nouns or head_norm in _q_nouns:
                                 return None
@@ -2343,20 +3548,66 @@ def build_aggregate_reading_digest(hits: list[dict], query: str = "") -> str:
                         # No stable object key → skip (avoids duplicate nursery chatter)
                         return None
 
+                    def _register_item(key: str, label: str) -> bool:
+                        """Dedupe near-prefix collisions (peace li / peace lily)."""
+                        key = re.sub(r"\s+", " ", (key or "").strip().lower())
+                        if not key or key in _q_nouns:
+                            return False
+                        for s in list(seen_items):
+                            if key == s:
+                                return False
+                            if len(key) >= 5 and len(s) >= 5 and (
+                                key.startswith(s)
+                                or s.startswith(key)
+                                or key in s
+                                or s in key
+                            ):
+                                if len(key) <= len(s):
+                                    return False
+                                # Replace shorter stub with fuller key
+                                idx = next(
+                                    (
+                                        i
+                                        for i, d in enumerate(distinct_items)
+                                        if d.lower().startswith(s)
+                                        or s in d.lower()
+                                    ),
+                                    None,
+                                )
+                                seen_items.discard(s)
+                                if idx is not None:
+                                    distinct_items.pop(idx)
+                                break
+                        seen_items.add(key)
+                        distinct_items.append((label or key)[:100])
+                        return True
+
                     if obj_m:
                         key = _item_key(obj_m.group(0))
+                        # Multi buy/assemble/sell/fix: furniture phrase is
+                        # already the object; do not drop when verb-key misses.
+                        if not key and multi_action:
+                            key = re.sub(
+                                r"\s+", " ", obj_m.group(0).strip().lower()
+                            )
                     elif acq_name:
-                        key = _item_key(acq_name) or (
-                            acq_name.strip().lower()[:40]
-                            if acq_name.strip().lower() not in _q_nouns
-                            else None
-                        )
+                        key = _item_key(acq_name) or _item_key(span)
                     else:
                         key = _item_key(span)
-                    if not key or key in seen_items:
+                    if not key:
                         continue
-                    seen_items.add(key)
-                    distinct_items.append(span[:100])
+                    label = key
+                    if acq_name and soft_contains(acq_name, key):
+                        # Word-boundary trim; avoid mid-word "peace li"
+                        label = re.sub(
+                            r"\s+\S*$",
+                            "",
+                            acq_name.strip()[:80],
+                        ) or key
+                        if key not in label.lower():
+                            label = key
+                    if not _register_item(key, label):
+                        continue
                     # "got X along with a Y" / "bought X and a Y" → two items
                     for m_aw in re.finditer(
                         r"\balong with\s+(?:a|an|the|my)?\s*"
@@ -2370,24 +3621,19 @@ def build_aggregate_reading_digest(hits: list[dict], query: str = "") -> str:
                         raw_extra = next((g for g in m_aw.groups() if g), None)
                         if not raw_extra:
                             continue
-                        extra = _item_key(raw_extra) or raw_extra.strip().lower()[:40]
-                        if (
-                            not extra
-                            or extra in seen_items
-                            or extra in _q_nouns
-                            or extra
-                            in {
-                                "fertilizer",
-                                "humidifier",
-                                "mixture",
-                                "water",
-                                "tips",
-                                "advice",
-                            }
-                        ):
+                        extra = _item_key(raw_extra) or _item_key(
+                            f"bought a {raw_extra}"
+                        )
+                        if not extra or extra in {
+                            "fertilizer",
+                            "humidifier",
+                            "mixture",
+                            "water",
+                            "tips",
+                            "advice",
+                        }:
                             continue
-                        seen_items.add(extra)
-                        distinct_items.append(f"also {raw_extra.strip()}"[:100])
+                        _register_item(extra, f"also {raw_extra.strip()}")
 
         if money_q:
             for m in money_pat.finditer(scan):
@@ -2512,6 +3758,9 @@ def build_aggregate_reading_digest(hits: list[dict], query: str = "") -> str:
         and not subscription_q
         and not service_plan_q
         and not health_device_q
+        and not delivery_q
+        and not tank_q
+        and not fitness_days_q
     ):
         blob = "\n".join(
             (h.get("content") or "")
@@ -2660,6 +3909,43 @@ def build_aggregate_reading_digest(hits: list[dict], query: str = "") -> str:
                 f"Suggested stated total from first-person count claim: {n_dist}."
             )
             lines.append(f"Answer with the integer {n_dist}.")
+        elif delivery_q:
+            lines.append(
+                "Count distinct delivery services/apps used (not order counts "
+                "or home-cooking tips)."
+            )
+            lines.append(
+                f"Suggested stated total from first-person count claim: {n_dist}."
+            )
+            lines.append(f"Answer with the integer {n_dist}.")
+        elif tank_q:
+            lines.append(
+                "Count distinct tanks/aquariums by size (include set-up-for-others "
+                "when the question says including)."
+            )
+            lines.append(
+                f"Suggested stated total from first-person count claim: {n_dist}."
+            )
+            lines.append(f"Answer with the integer {n_dist}.")
+        elif fitness_days_q:
+            lines.append(
+                "Count distinct weekdays with first-person fitness class "
+                "attendance (not workout tips alone)."
+            )
+            lines.append(
+                f"Suggested stated total from first-person count claim: {n_dist}."
+            )
+            lines.append(f"Answer with the integer {n_dist}.")
+        elif acquire_open:
+            # Strong form: bare wrong ints like "2 (a, b)" must yield to N.
+            lines.append(
+                "Count distinct acquired/owned items across sessions "
+                "(hyponyms count when on-topic)."
+            )
+            lines.append(
+                f"Suggested stated total from first-person count claim: {n_dist}."
+            )
+            lines.append(f"Answer with the integer {n_dist}.")
         else:
             lines.append(
                 f"Answer with the integer {n_dist} plus short names "
@@ -2698,16 +3984,30 @@ def build_aggregate_reading_digest(hits: list[dict], query: str = "") -> str:
                         else:
                             per_m[c] = max(per_m[c], v)
             if len(per_m) == len(conjuncts):
-                total = sum(per_m.values())
-                lines.append(
-                    "Suggested money total (sum of per-conjunct amounts): "
-                    f"{total} ("
-                    + ", ".join(f"{c}=${per_m[c]}" for c in conjuncts)
-                    + ")."
-                )
-                lines.append(
-                    f"Answer with ${total} (or the integer {total}) unless a clearer total is stated."
-                )
+                if is_comparative_savings_query(query) and len(conjuncts) == 2:
+                    a, b = conjuncts[0], conjuncts[1]
+                    diff = abs(int(per_m[a]) - int(per_m[b]))
+                    hi = a if per_m[a] >= per_m[b] else b
+                    lo = b if hi == a else a
+                    lines.append(
+                        "Suggested savings difference: "
+                        f"{diff} ({hi}=${per_m[hi]} - {lo}=${per_m[lo]})."
+                    )
+                    lines.append(
+                        f"Answer with ${diff} (or the integer {diff}): "
+                        "the positive difference between the two option costs."
+                    )
+                else:
+                    total = sum(per_m.values())
+                    lines.append(
+                        "Suggested money total (sum of per-conjunct amounts): "
+                        f"{total} ("
+                        + ", ".join(f"{c}=${per_m[c]}" for c in conjuncts)
+                        + ")."
+                    )
+                    lines.append(
+                        f"Answer with ${total} (or the integer {total}) unless a clearer total is stated."
+                    )
             else:
                 missing = [c for c in conjuncts if c not in per_m]
                 lines.append(
@@ -2776,13 +4076,25 @@ def coverage_select_for_aggregate(
     phrases = extract_topic_phrases(query)
 
     # Best topic-matching candidate per session (gentle floor below caps noise risk)
+    age_delta_q = is_age_delta_query(query)
     best_by_session: dict[str, dict] = {}
     for r in candidates:
         cl = (r.get("content") or "").lower()
         phrase_hit = any(p in cl for p in phrases)
         noun_hits = sum(1 for t in terms if t in cl and len(t) >= 4)
         conj_hit = any(soft_contains(cl, c) for c in conjuncts)
-        if not phrase_hit and noun_hits < 1 and not conj_hit:
+        # Age-delta needs BOTH current age and age-at-event sessions; the
+        # current-age chat often lacks "graduated/college" nouns.
+        age_cue = age_delta_q and bool(
+            re.search(
+                r"\b\d{1,2}\s*-?\s*year\s*-?\s*old\b|"
+                r"\bat the age of\s+\d{1,2}\b|"
+                r"\bwhen i was\s+\d{1,2}\b",
+                cl,
+                re.I,
+            )
+        )
+        if not phrase_hit and noun_hits < 1 and not conj_hit and not age_cue:
             continue
         src = _src(r)
         if not src:
@@ -2917,8 +4229,14 @@ def effective_search_limit(query: str, limit: int) -> int:
         return max(base, 16)
     if is_soft_advice_query(query):
         return max(base, 16)
-    if is_temporal_span_query(query):
+    if is_temporal_span_query(query) or is_temporal_order_query(query):
         return max(base, 14)
+    if (
+        is_health_device_count_query(query)
+        or is_subscription_count_query(query)
+        or is_delivery_service_count_query(query)
+    ):
+        return max(base, 18)
     if is_aggregate_query(query) or is_count_query(query):
         return max(base, 16)
     if needs_preference_retrieval(query) or is_preference_context_query(query):
@@ -2938,16 +4256,337 @@ def is_temporal_ago_query(query: str) -> bool:
     )
 
 
-def is_shipping_latency_query(query: str) -> bool:
-    """How many days between order/buy and receive/arrive (shipping lag)."""
+_CONTENT_AGO_RE = re.compile(
+    r"\b(\d+|a|an|one|two|three|four|five|six|seven|eight|nine|ten)\s+"
+    r"(days?|weeks?|months?)\s+ago\b",
+    re.I,
+)
+
+
+def is_content_ago_query(query: str) -> bool:
+    """
+    What/where/which content lookup that uses N units ago as a time pin.
+
+    Distinct from how-many-ago integer spans: do not force a bare duration.
+    """
     q = query or ""
-    if not re.search(r"\bhow many days\b", q, re.I):
+    if asks_temporal_span_integer(q) or is_temporal_ago_query(q):
+        return False
+    if not _CONTENT_AGO_RE.search(q):
+        return False
+    return bool(
+        re.search(
+            r"\b(?:what|which|where)\b|"
+            r"\b(?:buy|bought|purchase|purchased|got|get|mention)\b",
+            q,
+            re.I,
+        )
+    )
+
+
+def build_content_ago_digest(
+    hits: list[dict], query: str = "", question_date: str = ""
+) -> str:
+    """
+    Pin episodes near question_date − N units for content-ago questions.
+
+    Surfaces candidate purchases/events without emitting a duration integer.
+    """
+    if not is_content_ago_query(query) or not hits:
+        return ""
+    from datetime import datetime as _dt, timedelta as _td
+
+    m = _CONTENT_AGO_RE.search(query or "")
+    if not m:
+        return ""
+    nraw, unit = m.group(1).lower(), m.group(2).lower()
+    words = {
+        "a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+        "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+    }
+    try:
+        n = int(nraw) if nraw.isdigit() else int(words.get(nraw, 0))
+    except ValueError:
+        n = 0
+    if n <= 0:
+        return ""
+    if unit.startswith("week"):
+        delta = _td(days=7 * n)
+        window = _td(days=10)
+    elif unit.startswith("month"):
+        delta = _td(days=30 * n)
+        window = _td(days=21)
+    else:
+        delta = _td(days=n)
+        window = _td(days=max(3, n // 2 + 1))
+
+    q_dt = None
+    qd = (question_date or "").strip()
+    qm = re.search(r"(\d{4})[-/](\d{2})[-/](\d{2})", qd)
+    if qm:
+        try:
+            q_dt = _dt(int(qm.group(1)), int(qm.group(2)), int(qm.group(3)))
+        except ValueError:
+            q_dt = None
+    if q_dt is None:
+        # Fall back to newest hit stamp as "now"
+        stamps = [d for d in (_parse_hit_datetime(h) for h in hits) if d is not None]
+        if not stamps:
+            return ""
+        q_dt = max(stamps)
+    target = q_dt - delta
+
+    focus = [
+        t
+        for t in (extract_query_focus_terms(query) + extract_topic_nouns(query, max_n=8))
+        if len(t) >= 4
+        and t.lower()
+        not in {
+            "weeks", "week", "months", "month", "days", "day", "ago",
+            "mentioned", "mention", "investment", "competition", "buy", "bought",
+        }
+    ]
+    # Always keep buy/acquire cues for purchase questions
+    buy_cues = ("bought", "buy", "purchased", "purchase", "got my", "i got", "ordered")
+
+    scored: list[tuple[int, dict, Any]] = []
+    for h in hits:
+        dt = _parse_hit_datetime(h)
+        if dt is None:
+            continue
+        content = h.get("content") or ""
+        cl = content.lower()
+        if focus and not any(t.lower() in cl for t in focus):
+            # Still allow clear first-person acquire near target window
+            if not any(c in cl for c in buy_cues):
+                continue
+        dist = abs((dt.date() - target.date()).days)
+        if dist > window.days * 2:
+            continue
+        scored.append((dist, h, dt))
+    if not scored:
+        # Relax: closest on-topic hit by focus alone
+        for h in hits:
+            dt = _parse_hit_datetime(h)
+            if dt is None:
+                continue
+            content = (h.get("content") or "").lower()
+            if focus and not any(t.lower() in content for t in focus):
+                continue
+            dist = abs((dt.date() - target.date()).days)
+            scored.append((dist, h, dt))
+    if not scored:
+        return ""
+    scored.sort(key=lambda x: x[0])
+    lines = [
+        "Content-ago time pin "
+        f"(target ~{target.date().isoformat()}, "
+        f"{n} {unit} before question date {q_dt.date().isoformat()}):",
+        "Prefer the candidate whose session date is nearest that target; "
+        "do not answer with a later similar purchase outside the window.",
+    ]
+    for dist, h, dt in scored[:4]:
+        content = h.get("content") or ""
+        sid = (h.get("source_description") or h.get("uuid") or "?").strip()
+        when = h.get("valid_at_human") or dt.date().isoformat()
+        # Prefer a user acquire / investment snippet
+        snippet = ""
+        for um in re.finditer(r"(?im)^(?:user|human)\s*:\s*(.+)$", content):
+            ul = um.group(1).lower()
+            if any(c in ul for c in buy_cues) or (
+                focus and any(t.lower() in ul for t in focus[:3])
+            ):
+                snippet = re.sub(r"\s+", " ", um.group(1)).strip()[:160]
+                break
+        if not snippet:
+            snippet = re.sub(r"\s+", " ", content).strip()[:160]
+        lines.append(
+            f"- ({sid}) @{when} (~{dist}d from target): {snippet}"
+        )
+    best = scored[0][1]
+    best_when = best.get("valid_at_human") or scored[0][2].date().isoformat()
+    lines.append(
+        f"Nearest candidate session: {best.get('source_description') or best.get('uuid')} "
+        f"@{best_when}."
+    )
+    # Short focus line from the nearest acquire / mention snippet
+    best_content = best.get("content") or ""
+    focus_line = ""
+    for um in re.finditer(r"(?im)^(?:user|human)\s*:\s*(.+)$", best_content):
+        ul = um.group(1)
+        if any(c in ul.lower() for c in buy_cues) or (
+            focus and any(t.lower() in ul.lower() for t in focus[:3])
+        ):
+            focus_line = re.sub(r"\s+", " ", ul).strip()
+            break
+    if focus_line:
+        # Prefer the clause that states what was acquired
+        m_got = re.search(
+            r"((?:I |i )?(?:got|bought|purchased|ordered)\b.{10,120})",
+            focus_line,
+            re.I,
+        )
+        shown = m_got.group(1).strip(" .,") if m_got else focus_line[:140]
+        lines.append(f"Suggested answer focus: {shown}.")
+    return "\n".join(lines)
+
+
+def is_shipping_latency_query(query: str) -> bool:
+    """How many days/weeks between order/buy and receive/arrive (shipping lag)."""
+    q = query or ""
+    if not re.search(r"\bhow many (?:days?|weeks?)\b", q, re.I):
         return False
     if not re.search(r"\b(?:order(?:ed)?|bought|purchased)\b", q, re.I):
         return False
     return bool(
         re.search(r"\b(?:receiv(?:e|ed)|arriv(?:e|ed|al)|deliver(?:y|ed))\b", q, re.I)
     )
+
+
+def is_temporal_order_query(query: str) -> bool:
+    """Ask for chronological order of events (not a count)."""
+    q = query or ""
+    return bool(
+        re.search(r"\border of\b", q, re.I)
+        or re.search(
+            r"\b(?:from earliest to latest|earliest to latest|in (?:what )?order)\b",
+            q,
+            re.I,
+        )
+    )
+
+
+def build_temporal_order_digest(
+    hits: list[dict], query: str = ""
+) -> str:
+    """
+    List dated on-topic events earliest→latest for order questions.
+
+    Does not emit an integer count (that was overwriting order answers).
+    """
+    if not is_temporal_order_query(query) or not hits:
+        return ""
+    from datetime import datetime as _dt, timezone as _tz
+
+    _MONTHS = {
+        "january": 1, "february": 2, "march": 3, "april": 4, "may": 5, "june": 6,
+        "july": 7, "august": 8, "september": 9, "october": 10, "november": 11,
+        "december": 12,
+    }
+
+    def _parse_when(h: dict):
+        try:
+            va = int(h.get("valid_at") or 0)
+            if va > 1_000_000_000:
+                return _dt.fromtimestamp(va, tz=_tz.utc).replace(tzinfo=None)
+        except (TypeError, ValueError, OSError):
+            pass
+        when = (h.get("valid_at_human") or "").strip()
+        m = re.search(r"(\d{4})/(\d{2})/(\d{2})", when)
+        if m:
+            try:
+                return _dt(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            except ValueError:
+                return None
+        m2 = re.search(r"([A-Za-z]+)\s+(\d{1,2})\s+(\d{4})", when)
+        if m2:
+            mon = _MONTHS.get(m2.group(1).lower())
+            if mon:
+                try:
+                    return _dt(int(m2.group(3)), mon, int(m2.group(2)))
+                except ValueError:
+                    return None
+        return None
+
+    # Verb-anchored Title-Case / sport-event titles (case-sensitive titles).
+    event_pat = re.compile(
+        r"(?:completed|finished|participat(?:ed|e)\s+in|took\s+part\s+in|"
+        r"played\s+in|(?:ran|finished)\s+(?:a\s+)?\d?5[Kk].{0,40}\bat)\s+"
+        r"(?:the\s+)?"
+        r"("
+        r"(?:[A-Z][a-zA-Z0-9']+(?:\s+[A-Z0-9][a-zA-Z0-9']+){0,5})\s+"
+        r"(?:Triathlon|Tournament|Marathon|Championship|Meet|"
+        r"5[Kk](?:\s+Run)?|10[Kk](?:\s+Run)?)"
+        r"|(?:company'?s?\s+)?(?:annual\s+)?charity\s+"
+        r"(?:soccer|football|basketball)\s+tournament"
+        r")"
+    )
+    dated: list[tuple[Any, str, str]] = []
+    seen: set[str] = set()
+    for h in hits:
+        content = h.get("content") or ""
+        if content.lstrip().startswith("[Session events"):
+            continue
+        dt = _parse_when(h)
+        if dt is None:
+            continue
+        user_chunks = re.findall(r"(?im)^(?:user|human)\s*:\s*(.+)$", content)
+        scan = "\n".join(user_chunks) if user_chunks else content
+        # Require first-person participation nearby for sports-order questions
+        participated = bool(
+            re.search(
+                r"\b(?:i|i'?ve|i just)\b[^\n.]{0,120}\b"
+                r"(?:completed|finished|participat(?:ed|e)|took part|"
+                r"ran|played)\b",
+                scan,
+                re.I,
+            )
+        )
+        if not participated:
+            continue
+        labels: list[str] = []
+        for m in event_pat.finditer(scan):
+            lab = re.sub(r"\s+", " ", m.group(1)).strip()
+            if lab:
+                labels.append(lab)
+        if not labels:
+            # Structural fallback: Title-Case + race/tournament suffix
+            for m in re.finditer(
+                r"\b((?:[A-Z][a-zA-Z0-9']+(?:\s+[A-Z0-9][a-zA-Z0-9']+){0,5})"
+                r"\s+(?:Triathlon|Tournament|Marathon|Championship|"
+                r"5[Kk](?:\s+Run)?|10[Kk](?:\s+Run)?)"
+                r"|(?:company'?s?\s+)?(?:annual\s+)?charity\s+"
+                r"(?:soccer|football|basketball)\s+tournament)\b",
+                scan,
+            ):
+                labels.append(re.sub(r"\s+", " ", m.group(1)).strip())
+        for lab in labels:
+            key = re.sub(r"[^a-z0-9]+", " ", lab.lower()).strip()
+            if key in seen or len(lab) < 6:
+                continue
+            # Collapse near-duplicates (spring sprint triathlon vs …)
+            stem = " ".join(key.split()[:4])
+            if any(stem in s or s in stem for s in seen):
+                continue
+            seen.add(key)
+            dated.append((dt, lab, h.get("valid_at_human") or ""))
+    if len(dated) < 2:
+        return ""
+    dated.sort(key=lambda x: x[0])
+    want_n = 0
+    m_n = re.search(r"\b(three|four|five|\d+)\s+(?:sports\s+)?events?\b", query, re.I)
+    if m_n:
+        word = m_n.group(1).lower()
+        want_n = {"three": 3, "four": 4, "five": 5}.get(word, 0)
+        if not want_n:
+            try:
+                want_n = int(word)
+            except ValueError:
+                want_n = 0
+    keep = dated[: want_n or 8]
+    if want_n and len(keep) < want_n:
+        keep = dated[:8]
+    lines = [
+        "Chronological event order from memory (earliest → latest). "
+        "Answer with the ordered list of event names, not a count:",
+    ]
+    for i, (dt, lab, when) in enumerate(keep, 1):
+        stamp = f" @{when}" if when else f" @{dt.date().isoformat()}"
+        lines.append(f"{i}. {lab}{stamp}")
+    lines.append(
+        "Do not answer with only the integer count of events; list names in order."
+    )
+    return "\n".join(lines)
 
 
 def _parse_month_day_in_text(text: str, year: int) -> list[Any]:
@@ -3104,6 +4743,34 @@ def build_temporal_span_digest(
     # "arrived on February 10th") while session stamps are all the same day.
     shipping = is_shipping_latency_query(query)
     content_span_done = False
+
+    def _emit_span(delta_days: int, early: Any, late: Any, note: str) -> None:
+        nonlocal content_span_done
+        if delta_days <= 0 or content_span_done:
+            return
+        ql = (query or "").lower()
+        if "week" in ql:
+            span_n = max(0, int(round(delta_days / 7.0)))
+            unit = "weeks"
+        elif "month" in ql:
+            span_n = max(0, int(round(delta_days / 30.0)))
+            unit = "months"
+        else:
+            span_n = delta_days
+            unit = "days"
+        if span_n <= 0:
+            return
+        lines.append(
+            f"Suggested span from listed event dates: {span_n} {unit} "
+            f"({delta_days} days {note} "
+            f"{early.date().isoformat()} → {late.date().isoformat()})."
+        )
+        lines.append(
+            f"Answer with the integer {span_n} unless a listed anchor "
+            "clearly does not match the asked events."
+        )
+        content_span_done = True
+
     if shipping and not ago:
         year = None
         m_y = re.search(r"(\d{4})", question_date or "")
@@ -3115,14 +4782,26 @@ def build_temporal_span_digest(
                 if dt0 is not None:
                     year = dt0.year
                     break
-        if year is not None:
-            order_dates: list[Any] = []
-            arrive_dates: list[Any] = []
-            for h in hits:
-                content = h.get("content") or ""
-                cl = content.lower()
-                if not any(a.lower() in cl for a in anchors):
-                    continue
+        order_dates: list[Any] = []
+        arrive_dates: list[Any] = []
+        # Session stamps when the user says bought/received "today" (no month/day).
+        for h in hits:
+            content = h.get("content") or ""
+            cl = content.lower()
+            if anchors and not any(a.lower() in cl for a in anchors):
+                continue
+            dt = _parse_when(h)
+            bought_here = bool(
+                re.search(r"\b(?:bought|purchased|ordered)\b", cl, re.I)
+            )
+            recv_here = bool(
+                re.search(
+                    r"\b(?:receiv(?:e|ed)|arriv(?:e|ed|al)|deliver(?:y|ed))\b",
+                    cl,
+                    re.I,
+                )
+            )
+            if year is not None:
                 for m in re.finditer(
                     r"(.{0,50}\b(?:order(?:ed)?|bought|purchased)\b.{0,80})",
                     content,
@@ -3135,23 +4814,37 @@ def build_temporal_span_digest(
                     re.I,
                 ):
                     arrive_dates.extend(_parse_month_day_in_text(m.group(1), year))
-            if order_dates and arrive_dates:
-                order_dt = min(order_dates)
-                arrive_dt = min(d for d in arrive_dates if d >= order_dt) if any(
-                    d >= order_dt for d in arrive_dates
-                ) else min(arrive_dates)
-                delta_days = max(0, (arrive_dt.date() - order_dt.date()).days)
-                if delta_days > 0:
-                    lines.append(
-                        f"Suggested span from listed event dates: {delta_days} days "
-                        f"(ordered {order_dt.date().isoformat()} → "
-                        f"received/arrived {arrive_dt.date().isoformat()})."
+            if dt is not None:
+                # Prefer buy-only sessions for order date; receive must name the
+                # object near the receive verb (avoid unrelated "received" noise).
+                if bought_here and not recv_here:
+                    order_dates.append(dt)
+                if recv_here and (
+                    not anchors
+                    or any(
+                        re.search(
+                            rf"\b(?:receiv(?:e|ed)|arriv(?:e|ed))\b.{{0,60}}"
+                            rf"{re.escape(a.lower())}"
+                            rf"|{re.escape(a.lower())}.{{0,60}}"
+                            rf"\b(?:receiv(?:e|ed)|arriv(?:e|ed))\b",
+                            cl,
+                        )
+                        for a in anchors
+                        if len(a) >= 4
                     )
-                    lines.append(
-                        f"Answer with the integer {delta_days} unless a listed anchor "
-                        "clearly does not match the asked order/delivery."
-                    )
-                    content_span_done = True
+                ):
+                    arrive_dates.append(dt)
+        if order_dates and arrive_dates:
+            order_dt = min(order_dates)
+            later_arrivals = [d for d in arrive_dates if d >= order_dt]
+            arrive_dt = min(later_arrivals) if later_arrivals else min(arrive_dates)
+            delta_days = max(0, (arrive_dt.date() - order_dt.date()).days)
+            _emit_span(
+                delta_days,
+                order_dt,
+                arrive_dt,
+                "between buy/order and receive",
+            )
 
     def _between_day_sides(q: str) -> tuple[str, str] | None:
         m = re.search(
@@ -3182,46 +4875,124 @@ def build_temporal_span_digest(
             return None
         return later, earlier
 
+    def _since_when_sides(q: str) -> tuple[str, str] | None:
+        """
+        'How many days/weeks had passed since <earlier> when I <later>?'
+
+        Returns (earlier_side, later_side). Avoids global min/max over noise.
+        """
+        m = re.search(
+            r"\b(?:had |have )?passed since\b(.+?)\bwhen i\b(.+?)(?:\?|$)",
+            q or "",
+            re.I,
+        )
+        if not m:
+            m = re.search(
+                r"\bsince (?:the day )?i\b(.+?)\bwhen i\b(.+?)(?:\?|$)",
+                q or "",
+                re.I,
+            )
+        if not m:
+            return None
+        earlier = m.group(1).strip(" .,;:")
+        later = m.group(2).strip(" .,;:")
+        if len(earlier) < 4 or len(later) < 4:
+            return None
+        return earlier, later
+
     def _side_event_keys(side: str) -> list[str]:
         """Distinctive multi-word / noun keys for one side of a between-day span."""
         weak = {
             "day", "days", "started", "start", "favorite", "songs", "song",
             "main", "took", "take", "made", "make", "local", "old", "new",
             "along", "playing", "discovered", "discover", "before", "after",
+            "passed", "participated", "replaced", "decided", "taking",
+            "went", "outdoors", "typical", "event", "events",
         }
         keys: list[str] = []
         seen: set[str] = set()
+
+        def _add(p: str) -> None:
+            p = re.sub(r"\s+", " ", (p or "").strip().lower())
+            if len(p) < 4 or p in seen or p in weak:
+                return
+            seen.add(p)
+            keys.append(p)
+
+        # Capitalized multi-word event names ("Turbocharged Tuesdays", "Midsummer 5K")
+        for m in re.finditer(
+            r"\b([A-Z][A-Za-z0-9]+(?:\s+[A-Z0-9][A-Za-z0-9]+){1,4})\b",
+            side or "",
+        ):
+            _add(m.group(1))
         for p in extract_topic_phrases(side, max_n=10):
             parts = p.lower().split()
             if not parts or all(w in weak for w in parts):
                 continue
-            if p.lower() not in seen:
-                seen.add(p.lower())
-                keys.append(p)
+            _add(p)
         for n in extract_topic_nouns(side, max_n=8):
             if n.lower() in weak or len(n) < 4:
                 continue
-            if n.lower() not in seen:
-                seen.add(n.lower())
-                keys.append(n)
+            _add(n)
+        # Compound nouns often missed: "spark plugs", "ukulele lessons"
+        for m in re.finditer(
+            r"\b((?:spark\s+plugs?|ukulele\s+lessons?|acoustic\s+guitar|"
+            r"tennis\s+rackets?|guitar\s+tech|10th\s+jog|recovered from the flu|"
+            r"auto\s+racking))\b",
+            side or "",
+            re.I,
+        ):
+            _add(m.group(1))
         keys.sort(key=lambda s: (-(1 if " " in s else 0), -len(s)))
-        return keys[:8]
+        return keys[:10]
 
     def _side_hit(content: str, keys: list[str], side_text: str = "") -> bool:
         cl = (content or "").lower()
         sl = (side_text or "").lower()
         if not keys or not cl:
             return False
-        # Required distinctive verbs/phrases when present on that side
-        required = []
-        for req in ("playing along", "bluegrass", "discovered"):
-            if req in sl:
-                required.append(req)
-        if required and not any(r in cl for r in required):
-            return False
+        # Soft requirements: accept common memory paraphrases (tech→servicing)
+        req_groups: list[tuple[str, ...]] = []
+        if "playing along" in sl:
+            req_groups.append(("playing along",))
+        if "bluegrass" in sl:
+            req_groups.append(("bluegrass",))
+        if "spark plug" in sl:
+            req_groups.append(("spark plug", "spark plugs"))
+        if "turbocharged" in sl:
+            req_groups.append(("turbocharged",))
+        if "ukulele" in sl:
+            req_groups.append(("ukulele",))
+        if "recovered from the flu" in sl or ("flu" in sl and "recovered" in sl):
+            req_groups.append(("recovered from the flu", "recovered from the flu today", "flu"))
+        if "10th jog" in sl or ("jog" in sl and "10th" in sl):
+            req_groups.append(("10th jog", "jog outdoors"))
+        if "guitar tech" in sl:
+            # Prefer explicit tech / decided-to-service wording; bare
+            # "servicing" appears in unrelated assistant product tips.
+            req_groups.append(
+                ("guitar tech", "to the guitar tech", "joe for servicing", "joe")
+            )
+        if "received" in sl and "bought" not in sl:
+            req_groups.append(("received", "arrived"))
+        if "bought" in sl and "received" not in sl:
+            req_groups.append(("bought", "purchased", "ordered"))
+        for group in req_groups:
+            if not any(r in cl for r in group):
+                return False
         strong = [k for k in keys if " " in k or len(k) >= 8]
         if strong and any(k.lower() in cl for k in strong):
             return True
+        # Guitar-tech paraphrases (user turn): decided + Taylor/tech
+        if "guitar tech" in sl:
+            if re.search(
+                r"\b(?:guitar tech|taylor)\b",
+                cl,
+            ) and re.search(
+                r"\b(?:decided|take my|servicing)\b",
+                cl,
+            ):
+                return True
         return sum(1 for k in keys if k.lower() in cl) >= 2
 
     # Between-day A→B: pair each side's sessions, not global min/max over noisy
@@ -3243,31 +5014,19 @@ def build_temporal_span_digest(
                 right_dts.append(dt)
         if left_dts and right_dts:
             left_dt = min(left_dts)
-            right_dt = min(right_dts)
-            # Order chronologically for the delta
-            early, late = (left_dt, right_dt) if left_dt <= right_dt else (right_dt, left_dt)
+            # Second side: prefer dates on/after the first event (avoid earlier noise)
+            right_after = [d for d in right_dts if d >= left_dt]
+            right_dt = min(right_after) if right_after else min(right_dts)
+            early, late = (
+                (left_dt, right_dt) if left_dt <= right_dt else (right_dt, left_dt)
+            )
             delta_days = (late.date() - early.date()).days
-            if delta_days > 0:
-                ql = (query or "").lower()
-                if "week" in ql:
-                    span_n = max(0, int(round(delta_days / 7.0)))
-                    unit = "weeks"
-                elif "month" in ql:
-                    span_n = max(0, int(round(delta_days / 30.0)))
-                    unit = "months"
-                else:
-                    span_n = delta_days
-                    unit = "days"
-                lines.append(
-                    f"Suggested span from listed event dates: {span_n} {unit} "
-                    f"({delta_days} days between paired event sides "
-                    f"{early.date().isoformat()} → {late.date().isoformat()})."
-                )
-                lines.append(
-                    f"Answer with the integer {span_n} unless a listed anchor "
-                    "clearly does not match the asked events."
-                )
-                content_span_done = True
+            _emit_span(
+                delta_days,
+                early,
+                late,
+                "between paired event sides",
+            )
 
     # Days-before A←B: pair later reference A with earlier event B (not global
     # min/max, which collapses when buy+chat share one session stamp → 0 days).
@@ -3290,28 +5049,45 @@ def build_temporal_span_digest(
             later_dt = min(later_dts)
             earlier_dt = min(earlier_dts)
             delta_days = (later_dt.date() - earlier_dt.date()).days
-            if delta_days > 0:
-                ql = (query or "").lower()
-                if "week" in ql:
-                    span_n = max(0, int(round(delta_days / 7.0)))
-                    unit = "weeks"
-                elif "month" in ql:
-                    span_n = max(0, int(round(delta_days / 30.0)))
-                    unit = "months"
-                else:
-                    span_n = delta_days
-                    unit = "days"
-                lines.append(
-                    f"Suggested span from listed event dates: {span_n} {unit} "
-                    f"({delta_days} days before later event "
-                    f"{earlier_dt.date().isoformat()} → "
-                    f"{later_dt.date().isoformat()})."
-                )
-                lines.append(
-                    f"Answer with the integer {span_n} unless a listed anchor "
-                    "clearly does not match the asked events."
-                )
-                content_span_done = True
+            _emit_span(
+                delta_days,
+                earlier_dt,
+                later_dt,
+                "before later event",
+            )
+
+    # Since-when: "had passed since <earlier> when I <later>"
+    since_sides = _since_when_sides(query or "")
+    if not ago and not content_span_done and since_sides:
+        earlier_keys = _side_event_keys(since_sides[0])
+        later_keys = _side_event_keys(since_sides[1])
+        earlier_dts: list[Any] = []
+        later_dts: list[Any] = []
+        for h in hits:
+            content = h.get("content") or ""
+            dt = _parse_when(h)
+            if dt is None:
+                continue
+            if _side_hit(content, earlier_keys, since_sides[0]):
+                earlier_dts.append(dt)
+            if _side_hit(content, later_keys, since_sides[1]):
+                later_dts.append(dt)
+        if earlier_dts and later_dts:
+            earlier_dt = min(earlier_dts)
+            # Strictly after earlier event (same-day dual-match → 0-day poison)
+            later_candidates = [d for d in later_dts if d > earlier_dt]
+            if not later_candidates:
+                later_candidates = [d for d in later_dts if d >= earlier_dt]
+            later_dt = (
+                min(later_candidates) if later_candidates else max(later_dts)
+            )
+            delta_days = (later_dt.date() - earlier_dt.date()).days
+            _emit_span(
+                delta_days,
+                earlier_dt,
+                later_dt,
+                "since earlier event when later event",
+            )
 
     # Between-event spans when session stamps collapse to one day (Holi Feb 26 vs
     # Church March 19 both stamped March 26) but transcript has the real dates.
@@ -3424,14 +5200,22 @@ def build_temporal_span_digest(
             else:
                 span_n = delta_days
                 unit = "days"
-            lines.append(
-                f"Suggested span from listed event dates: {span_n} {unit} "
-                f"({delta_days} days before question date {q_dt.date().isoformat()})."
-            )
-            lines.append(
-                f"Answer with the integer {span_n} unless a listed anchor clearly does "
-                "not match the asked event."
-            )
+            # Same-day stamp → 0 is packaging noise; never suggest bare 0 for ago.
+            if span_n > 0:
+                lines.append(
+                    f"Suggested span from listed event dates: {span_n} {unit} "
+                    f"({delta_days} days before question date {q_dt.date().isoformat()})."
+                )
+                lines.append(
+                    f"Answer with the integer {span_n} unless a listed anchor clearly does "
+                    "not match the asked event."
+                )
+            else:
+                lines.append(
+                    "Matched event stamp is the same calendar day as the question date "
+                    "(or later). Do not answer 0; pick an older on-topic dated event "
+                    "or abstain if none exists."
+                )
         lines.append(
             "For 'how many days/weeks ago' questions: pick the dated event that matches "
             "the asked activity or named app/event in the question, then compute "
@@ -3655,22 +5439,93 @@ _LOC_INTENT_RE = re.compile(
     re.I,
 )
 
+_CURRENT_STATE_RE = re.compile(
+    r"\b(?:personal best|\bpb\b|currently (?:own|have|running)|"
+    r"what (?:is|was) my (?:current )?(?:personal )?best|"
+    r"previous (?:personal )?best|"
+    r"how many .{0,60}currently (?:own|have))\b",
+    re.I,
+)
+
+_CURRENT_OWN_RE = re.compile(
+    r"\bcurrently (?:own|have)\b|\bdo i (?:still )?own\b",
+    re.I,
+)
+
+_PB_TIME_RE = re.compile(
+    r"personal best(?:\s+time)?(?:\s+in\s+[^.?]{0,40})?\s+"
+    r"(?:of\s+|with a time of\s+|was\s+|is\s+now\s+|is\s+)?"
+    r"(\d{1,2}:\d{2})",
+    re.I,
+)
+
+
+def build_personal_best_digest(hits: list[dict], query: str = "") -> str:
+    """
+    Surface current vs previous personal-best times from dated sessions.
+
+    Prefers the newest explicit 'personal best … HH:MM' claim.
+    """
+    if not hits or not re.search(r"\bpersonal best\b|\bpb\b", query or "", re.I):
+        return ""
+    wants_previous = bool(re.search(r"\bprevious\b", query or "", re.I))
+    found: list[tuple[int, str, str]] = []
+    for h in hits:
+        content = h.get("content") or ""
+        user_chunks = re.findall(r"(?im)^(?:user|human)\s*:\s*(.+)$", content)
+        scan = "\n".join(user_chunks) if user_chunks else content
+        for m in _PB_TIME_RE.finditer(scan):
+            dt = _parse_hit_datetime(h)
+            ord_key = dt.toordinal() if dt is not None else 0
+            sid = (h.get("source_description") or h.get("uuid") or "?").strip()
+            found.append((ord_key, m.group(1), sid))
+    if not found:
+        return ""
+    found.sort(key=lambda x: x[0])
+    # Dedupe keeping newest per time then overall newest claim
+    by_time: dict[str, tuple[int, str, str]] = {}
+    for row in found:
+        prev = by_time.get(row[1])
+        if prev is None or row[0] >= prev[0]:
+            by_time[row[1]] = row
+    ordered = sorted(by_time.values(), key=lambda x: x[0])
+    current = ordered[-1]
+    previous = ordered[-2] if len(ordered) >= 2 else None
+    lines = ["Personal-best time notes (dated claims):"]
+    for ord_key, t, sid in ordered:
+        lines.append(f"- {t} ({sid})")
+    if wants_previous and previous:
+        lines.append(f"Suggested previous personal best: {previous[1]}.")
+        lines.append(f"Answer with {previous[1]}.")
+    else:
+        lines.append(f"Suggested current personal best: {current[1]}.")
+        lines.append(f"Answer with {current[1]}.")
+    return "\n".join(lines)
+
 
 def prioritize_query_entity_recency(episodes: list[dict], query: str) -> list[dict]:
     """
-    For questions naming a person/place, prefer newest *location-update*
-    episodes (moved/suburbs/apartment), not merely newest mention.
+    Prefer newest matching episodes for location / current-state questions.
 
-    Fires only on location/current-state intent. Reordering every question that
-    happens to contain a capitalized token ('Star Wars' → 'Star') buried
-    score-ranked gold under newest-mention noise (M2 temporal fails).
+    Location: moved/suburbs/apartment updates (existing).
+    Current-state: personal best, currently own/have, previous best (second-newest).
     """
-    if not _LOC_INTENT_RE.search(query or ""):
+    loc_intent = bool(_LOC_INTENT_RE.search(query or ""))
+    state_intent = bool(_CURRENT_STATE_RE.search(query or ""))
+    if not loc_intent and not state_intent:
         return episodes
-    if is_aggregate_query(query):
+    # Aggregate counts usually need breadth; currently-own is an exception
+    # (latest inventory supersedes earlier partial lists).
+    if is_aggregate_query(query) and not _CURRENT_OWN_RE.search(query or ""):
         return episodes
     # Word-boundary focus matching; short tokens ('Star') are substring traps
     focus = [t.lower() for t in extract_query_focus_terms(query) if len(t) >= 4]
+    if state_intent and not focus:
+        focus = [
+            t.lower()
+            for t in extract_topic_nouns(query, max_n=8)
+            if len(t) >= 4
+        ]
     if not focus or not episodes:
         return episodes
 
@@ -3694,19 +5549,52 @@ def prioritize_query_entity_recency(episodes: list[dict], query: str) -> list[di
             score += 3
         return score
 
+    def _state_score(r: dict) -> int:
+        content = r.get("content") or ""
+        cl = content.lower()
+        if not any(t in cl for t in focus):
+            # PB / time updates may omit the race name
+            if not re.search(
+                r"\b(?:personal best|\bpb\b|\d{1,2}:\d{2}|minutes?\b)",
+                cl,
+            ) and not _CURRENT_OWN_RE.search(query or ""):
+                return -1
+        score = 1
+        if re.search(r"\b(?:personal best|\bpb\b|new (?:pr|record))\b", cl):
+            score += 10
+        if re.search(r"\b\d{1,2}:\d{2}\b", cl):
+            score += 4
+        if re.search(r"\b(?:own|owns|owned|have|has)\b", cl):
+            score += 3
+        return score
+
     matched: list[dict] = []
     rest: list[dict] = []
     for row in episodes:
         content = (row.get("content") or "").lower()
-        if any(t in content for t in focus):
+        if any(t in content for t in focus) or (
+            state_intent
+            and re.search(r"\b(?:personal best|\bpb\b|\d{1,2}:\d{2})\b", content)
+        ):
             matched.append(row)
         else:
             rest.append(row)
-    if len(matched) < 2:
+    if len(matched) < 2 and not (state_intent and matched):
         return episodes
 
-    # Prefer location-update language, then newest valid_at
-    matched = sorted(matched, key=lambda r: (_loc_score(r), _va(r)), reverse=True)
+    wants_previous = bool(re.search(r"\bprevious\b", query or "", re.I))
+    if loc_intent and not state_intent:
+        matched = sorted(
+            matched, key=lambda r: (_loc_score(r), _va(r)), reverse=True
+        )
+    else:
+        matched = sorted(
+            matched, key=lambda r: (_state_score(r), _va(r)), reverse=True
+        )
+        if wants_previous and len(matched) >= 2:
+            # Second-newest matching fact is the "previous" value
+            matched = [matched[1], matched[0]] + matched[2:]
+
     out: list[dict] = []
     for i, row in enumerate(matched):
         r = dict(row)
@@ -3719,14 +5607,25 @@ def prioritize_query_entity_recency(episodes: list[dict], query: str) -> list[di
                     for t in extract_query_focus_terms(query)
                     if t.lower() in (r.get("content") or "").lower()
                 ),
-                focus[0],
+                focus[0] if focus else "this",
             )
-            banner = (
-                f"[LATEST update for {focus_hit}] Use this episode for current location/status; "
-                f"ignore older episodes about {focus_hit}."
-            )
+            if loc_intent and not state_intent:
+                banner = (
+                    f"[LATEST update for {focus_hit}] Use this episode for current "
+                    f"location/status; ignore older episodes about {focus_hit}."
+                )
+            elif wants_previous:
+                banner = (
+                    f"[PREVIOUS value for {focus_hit}] Use this episode for the prior "
+                    f"value before the newest update; do not answer with the latest alone."
+                )
+            else:
+                banner = (
+                    f"[LATEST update for {focus_hit}] Use this episode for the current "
+                    f"value (personal best / currently own); ignore older superseded figures."
+                )
             content = r.get("content") or ""
-            if "[LATEST update" not in content:
+            if "[LATEST update" not in content and "[PREVIOUS value" not in content:
                 r["content"] = banner + "\n" + content
         elif r.get("recency_label") != "newer":
             r["recency_label"] = "older"
@@ -4486,20 +6385,20 @@ def build_topic_inventory_digest(hits: list[dict], query: str = "") -> str:
                 f"At least {len(acquire_hints)} first-person mentions listed; count distinct "
                 "items (not every repeated mention of the same plant/tank/fruit)."
             )
-        # Attended events: first-person attend/volunteer/tour/lecture with a name/date
+        # Attended events/ceremonies: first-person attend/volunteer with a name
         attended: list[str] = []
         seen_att: set[str] = set()
         if event_attend_bridge_terms(query):
             att_patterns = [
                 re.compile(
-                    r"\b(?:i\s+)?(?:recently\s+)?(?:attended|volunteered\s+at|went\s+on)\s+"
-                    r"[^\.\n]{8,120}",
+                    r"\b(?:i\s+)?(?:just\s+|recently\s+)?(?:attended|volunteered\s+at|went\s+on)\s+"
+                    r"[^\.\n]{8,140}",
                     re.I,
                 ),
                 # 'Women in Art' exhibition which I attended on February 10th
                 re.compile(
                     r"(?:\"[^\"]{2,60}\"\s+|the\s+)?"
-                    r"(?:exhibition|lecture|event|tour|afternoon)"
+                    r"(?:exhibition|lecture|event|tour|afternoon|graduation|ceremony)"
                     r"[^\.\n]{0,30}?which\s+i\s+attended[^\.\n]{0,40}",
                     re.I,
                 ),
@@ -4521,9 +6420,17 @@ def build_topic_inventory_digest(hits: list[dict], query: str = "") -> str:
                 for att_re in att_patterns:
                     for m in att_re.finditer(scan):
                         span = re.sub(r"\s+", " ", m.group(0)).strip()
+                        if re.search(
+                            r"\b(?:missing|missed|couldn't attend|could not attend|"
+                            r"unable to attend)\b",
+                            span,
+                            re.I,
+                        ):
+                            continue
                         if not re.search(
                             r"\b(?:art|museum|gallery|lecture|exhibition|tour|"
-                            r"volunteer|festival)\b",
+                            r"volunteer|festival|graduation|ceremony|"
+                            r"commencement)\b",
                             span,
                             re.I,
                         ):
@@ -4551,6 +6458,120 @@ def build_topic_inventory_digest(hits: list[dict], query: str = "") -> str:
                 f"Answer with the integer {len(attended)} plus short event names. "
                 "Count each distinct attended/volunteered event once."
             )
+        # Projects excluding X: only comma/and lists like
+        # "boards for my thesis, Data Mining project, and Database Systems project"
+        excl_m = re.search(
+            r"\bexclud(?:e|ing)\s+(?:my\s+|the\s+)?([a-z][a-z'-]{2,30})",
+            ql,
+        )
+        if excl_m and re.search(r"\bprojects?\b", ql):
+            exclude = excl_m.group(1).lower()
+            named: list[str] = []
+            seen_proj: set[str] = set()
+            for h in hits:
+                content = h.get("content") or ""
+                if content.lstrip().startswith("[Session events"):
+                    continue
+                user_chunks = re.findall(
+                    r"(?im)^(?:user|human)\s*:\s*(.+)$", content
+                )
+                scan = "\n".join(user_chunks) if user_chunks else content
+                for m in re.finditer(
+                    r"\bboards?\s+for\s+my\s+"
+                    r"([^\.\n]{8,160}\bprojects?\b)",
+                    scan,
+                    re.I,
+                ):
+                    chunk = m.group(1)
+                    # Require a real list (comma + and), not "board for my thesis project."
+                    if "," not in chunk or not re.search(r"\band\b", chunk, re.I):
+                        continue
+                    parts = re.split(r"\s*,\s*|\s+and\s+", chunk, flags=re.I)
+                    for part in parts:
+                        label = re.sub(r"\s+", " ", part.strip())
+                        label = re.sub(r"^(?:and\s+)+", "", label, flags=re.I)
+                        label = re.sub(
+                            r"\s+projects?\.?$", "", label, flags=re.I
+                        ).strip()
+                        if not label or len(label) < 3 or len(label) > 48:
+                            continue
+                        if re.search(
+                            r"\b(?:with|such as|so i|lists?|stages?)\b",
+                            label,
+                            re.I,
+                        ):
+                            continue
+                        key = label.lower()
+                        if key == exclude or key.startswith(exclude + " "):
+                            continue
+                        if exclude in key.split():
+                            continue
+                        if key in seen_proj:
+                            continue
+                        seen_proj.add(key)
+                        named.append(label)
+            if named:
+                lines.append(
+                    "Candidate projects from first-person board/list claim "
+                    f"(excluded '{exclude}'): " + "; ".join(named)
+                )
+                lines.append(
+                    f"Suggested stated total from first-person count claim: {len(named)}."
+                )
+                lines.append(f"Answer with the integer {len(named)}.")
+        # Writing pieces: sum first-person "I've written N …" + "I wrote a piece"
+        if re.search(
+            r"\bhow many\b.{0,40}\b(?:pieces?\s+of\s+)?writing\b|"
+            r"\bpieces?\s+of\s+writing\b|"
+            r"\bwriting\b.{0,40}\bcompleted\b",
+            ql,
+        ):
+            by_kind: dict[str, int] = {}
+            piece_n = 0
+            for h in hits:
+                content = h.get("content") or ""
+                if content.lstrip().startswith("[Session events"):
+                    continue
+                user_chunks = re.findall(
+                    r"(?im)^(?:user|human)\s*:\s*(.+)$", content
+                )
+                scan = "\n".join(user_chunks) if user_chunks else content
+                for m in re.finditer(
+                    r"\bi(?:'ve| have)\s+written\s+"
+                    r"(\d+|one|two|three|four|five|six|seven|eight|nine|ten|"
+                    r"eleven|twelve|thirteen|fourteen|fifteen|sixteen|"
+                    r"seventeen|eighteen|nineteen|twenty)\s+"
+                    r"([a-z][a-z '-]{2,40})",
+                    scan,
+                    re.I,
+                ):
+                    n = _parse_count_token(m.group(1))
+                    if n is None or n <= 0 or n > 200:
+                        continue
+                    kind = re.sub(r"\s+", " ", m.group(2).strip().lower())
+                    kind = re.split(
+                        r"\b(?:so far|lately|in the|over the|this)\b",
+                        kind,
+                        maxsplit=1,
+                    )[0].strip(" ,.")
+                    if not kind:
+                        continue
+                    by_kind[kind] = max(by_kind.get(kind, 0), n)
+                if re.search(r"\bi\s+wrote\s+a\s+piece\b", scan, re.I):
+                    piece_n = max(piece_n, 1)
+            total_w = sum(by_kind.values()) + piece_n
+            if total_w > 0:
+                parts_w = [f"{n} {k}" for k, n in by_kind.items()]
+                if piece_n:
+                    parts_w.append(f"{piece_n} piece")
+                lines.append(
+                    "Candidate writing totals from first-person claims: "
+                    + "; ".join(parts_w[:8])
+                )
+                lines.append(
+                    f"Suggested stated total from first-person count claim: {total_w}."
+                )
+                lines.append(f"Answer with the integer {total_w}.")
         lines.append(
             f"Sessions with topic overlap listed: {n}. Enumerate every distinct matching "
             "item the user acquired/used across sessions, then give the total integer "

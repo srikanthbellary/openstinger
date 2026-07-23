@@ -281,6 +281,23 @@ def test_smart_excerpt_keeps_query_terms():
     assert "coupon" in out.lower() or "creamer" in out.lower()
 
 
+def test_smart_excerpt_keeps_count_query_opener():
+    """Opening first-person acquire lines must survive excerpting for counts."""
+    from openstinger.temporal.search_utils import smart_episode_excerpt
+
+    opener = "user: I'm also getting Architectural Digest, which I love.\n"
+    mid = ("assistant: Sure. " + ("hours talking " * 400) + "\n")
+    closer = "assistant: Enjoy your Architectural Digest subscription!\n"
+    body = opener + mid + closer
+    assert len(body) > 4000
+    out = smart_episode_excerpt(
+        body,
+        "How many magazine subscriptions do I currently have?",
+        max_chars=2500,
+    )
+    assert "getting Architectural Digest" in out
+
+
 def test_query_noun_and_preference_context_boost():
     from openstinger.temporal.search_utils import (
         apply_preference_context_boost,
@@ -582,6 +599,312 @@ def test_activity_sum_and_temporal_ago_digest():
     assert "question_date" in sd or "baking" in sd.lower()
 
 
+def test_fitness_days_per_week_count():
+    from openstinger.temporal.search_utils import (
+        build_aggregate_reading_digest,
+        is_fitness_days_per_week_query,
+    )
+
+    q = "How many days a week do I attend fitness classes?"
+    assert is_fitness_days_per_week_query(q)
+    assert is_fitness_days_per_week_query(
+        "How many fitness classes do I attend in a typical week?"
+    )
+    assert is_fitness_days_per_week_query(
+        "How many fitness classes do I attend each week?"
+    )
+    assert not is_fitness_days_per_week_query(
+        "How many fitness classes have I attended in the past three months?"
+    )
+    hits = [
+        {
+            "source_description": "f1",
+            "content": (
+                "user: I attend Zumba classes on Tuesdays and Thursdays at "
+                "6:30 pm, and a weightlifting class on Saturdays at 10 am."
+            ),
+        },
+        {
+            "source_description": "f2",
+            "content": (
+                "user: I've recently started a yoga class on Wednesdays."
+            ),
+        },
+    ]
+    d = build_aggregate_reading_digest(hits, q)
+    assert "Suggested distinct item count: 4" in d
+    assert "Suggested stated total from first-person count claim: 4" in d
+    d2 = build_aggregate_reading_digest(
+        hits, "How many fitness classes do I attend in a typical week?"
+    )
+    assert "Suggested stated total from first-person count claim: 4" in d2
+
+
+def test_multi_action_furniture_item_keys():
+    from openstinger.temporal.search_utils import build_aggregate_reading_digest
+
+    q = (
+        "How many pieces of furniture did I buy, assemble, sell, or fix "
+        "in the past few months?"
+    )
+    hits = [
+        {
+            "source_description": "u1",
+            "content": "user: I bought a coffee table for the living room.",
+        },
+        {
+            "source_description": "u2",
+            "content": "user: I assembled a new bookshelf over the weekend.",
+        },
+        {
+            "source_description": "u3",
+            "content": "user: I sold my old mattress to a neighbor.",
+        },
+        {
+            "source_description": "u4",
+            "content": "user: I fixed the kitchen table leg that was wobbling.",
+        },
+    ]
+    d = build_aggregate_reading_digest(hits, q)
+    assert "Suggested distinct item count: 4" in d
+    assert "Answer with the integer 4" in d
+
+
+def test_including_clause_not_and_conjuncts():
+    from openstinger.temporal.search_utils import extract_and_conjuncts
+
+    q = (
+        "How many total pieces of writing have I completed, including short "
+        "stories, poems, and pieces for the writing challenge?"
+    )
+    assert extract_and_conjuncts(q) == []
+
+
+def test_graduation_ceremony_attend_count():
+    from openstinger.temporal.search_utils import (
+        build_topic_inventory_digest,
+        event_attend_bridge_terms,
+    )
+
+    q = "How many graduation ceremonies have I attended in the past three months?"
+    assert event_attend_bridge_terms(q)
+    hits = [
+        {
+            "source_description": "g1",
+            "content": (
+                "user: I feel guilty about missing my nephew Jack's eighth "
+                "grade graduation ceremony last month."
+            ),
+        },
+        {
+            "source_description": "g2",
+            "content": (
+                "user: I just attended my little cousin Emma's preschool "
+                "graduation about two months ago!"
+            ),
+        },
+        {
+            "source_description": "g3",
+            "content": (
+                "user: By the way, I just attended my colleague Alex's "
+                "graduation from a leadership development program at work "
+                "a few weeks ago."
+            ),
+        },
+        {
+            "source_description": "g4",
+            "content": (
+                "user: I just attended my best friend Rachel's master's "
+                "degree graduation ceremony a couple of weeks ago."
+            ),
+        },
+    ]
+    d = build_topic_inventory_digest(hits, q)
+    assert "Suggested distinct attended events listed: 3" in d
+
+
+def test_projects_excluding_list_count():
+    from openstinger.temporal.search_utils import build_topic_inventory_digest
+
+    q = (
+        "How many projects have I been working on simultaneously, "
+        "excluding my thesis?"
+    )
+    hits = [
+        {
+            "source_description": "p1",
+            "content": (
+                "user: I've created separate boards for my thesis, Data Mining "
+                "project, and Database Systems project."
+            ),
+        },
+    ]
+    d = build_topic_inventory_digest(hits, q)
+    assert "Suggested stated total from first-person count claim: 2" in d
+
+
+def test_writing_pieces_stated_sum():
+    from openstinger.temporal.search_utils import build_topic_inventory_digest
+
+    q = (
+        "How many total pieces of writing have I completed since I started "
+        "writing again three weeks ago, including short stories, poems, and "
+        "pieces for the writing challenge?"
+    )
+    hits = [
+        {
+            "source_description": "w1",
+            "content": (
+                "user: I've written five short stories so far, and I'm hoping "
+                "to keep the momentum going."
+            ),
+        },
+        {
+            "source_description": "w2",
+            "content": (
+                "user: I've been on a roll lately - I've written 17 poems in "
+                "the past two weeks."
+            ),
+        },
+        {
+            "source_description": "w3",
+            "content": (
+                "user: Last week's prompt was forgotten memories, and I wrote "
+                "a piece titled The Smell of Old Books."
+            ),
+        },
+    ]
+    d = build_topic_inventory_digest(hits, q)
+    assert "Suggested stated total from first-person count claim: 23" in d
+
+
+def test_acquire_open_emits_strong_stated_total():
+    from openstinger.temporal.search_utils import build_aggregate_reading_digest
+
+    q = "How many plants did I acquire in the last month?"
+    hits = [
+        {
+            "source_description": "a",
+            "content": (
+                "user: my peace lily, which I got from the nursery two weeks ago "
+                "along with a succulent."
+            ),
+        },
+        {
+            "source_description": "b",
+            "content": (
+                "user: I should repot my snake plant, which I got from my sister "
+                "last month."
+            ),
+        },
+    ]
+    d = build_aggregate_reading_digest(hits, q)
+    assert "Suggested distinct item count: 3" in d
+    assert "Suggested stated total from first-person count claim: 3" in d
+
+
+def test_age_delta_bridges_and_digest():
+    from openstinger.temporal.search_utils import (
+        age_delta_bridge_terms,
+        build_age_delta_digest,
+        is_age_delta_query,
+    )
+
+    q = "How many years older am I than when I graduated from college?"
+    assert is_age_delta_query(q)
+    assert "year-old" in age_delta_bridge_terms(q)
+    hits = [
+        {
+            "source_description": "a1",
+            "content": (
+                "user: As a 32-year-old Digital Marketing Specialist at TechSavvy "
+                "Inc., I want to level up."
+            ),
+        },
+        {
+            "source_description": "a2",
+            "content": (
+                "user: I went to UC Berkeley, which I completed at the age of 25."
+            ),
+        },
+    ]
+    d = build_age_delta_digest(hits, q)
+    assert "Suggested stated total from first-person count claim: 7" in d
+
+
+def test_tank_count_including_setup():
+    from openstinger.temporal.search_utils import (
+        build_aggregate_reading_digest,
+        is_tank_count_query,
+    )
+
+    q = (
+        "How many tanks do I currently have, including the one I set up "
+        "for my friend's kid?"
+    )
+    assert is_tank_count_query(q)
+    hits = [
+        {
+            "source_description": "t1",
+            "content": (
+                "user: I set up a 1-gallon tank for my friend's kid last weekend."
+            ),
+        },
+        {
+            "source_description": "t2",
+            "content": (
+                "user: I have a 5-gallon betta tank with Finley, and a "
+                "20-gallon community tank called Amazonia."
+            ),
+        },
+        {
+            "source_description": "t3",
+            "content": (
+                "user: My 20-gallon freshwater community tank is looking great."
+            ),
+        },
+    ]
+    d = build_aggregate_reading_digest(hits, q)
+    assert "Suggested distinct item count: 3" in d
+    assert "Suggested stated total from first-person count claim: 3" in d
+
+
+def test_delivery_service_count():
+    from openstinger.temporal.search_utils import (
+        build_aggregate_reading_digest,
+        is_delivery_service_count_query,
+    )
+
+    q = "How many different types of food delivery services have I used recently?"
+    assert is_delivery_service_count_query(q)
+    hits = [
+        {
+            "source_description": "d1",
+            "content": (
+                "user: I've been relying on food delivery services a lot lately "
+                "- I had Domino's Pizza three times last week!"
+            ),
+        },
+        {
+            "source_description": "d2",
+            "content": (
+                "user: my weekends have been all about Uber Eats lately, "
+                "it's been a lifesaver."
+            ),
+        },
+        {
+            "source_description": "d3",
+            "content": (
+                "user: relying on food delivery services, like this new one I "
+                "found called Fresh Fusion - they have some great pre-made meals."
+            ),
+        },
+    ]
+    d = build_aggregate_reading_digest(hits, q)
+    assert "Suggested distinct item count: 3" in d
+    assert "Suggested stated total from first-person count claim: 3" in d
+
+
 def test_health_device_daily_count():
     from openstinger.temporal.search_utils import (
         build_aggregate_reading_digest,
@@ -765,12 +1088,19 @@ def test_aggregate_enumerate_acquire_and_rewatch_verbs():
                 "is doing great."
             ),
         },
+        {
+            "source_description": "noise",
+            "content": (
+                "user: I've got a pretty big area to cover with my fencing."
+            ),
+        },
     ]
     ad = build_aggregate_reading_digest(
         along_hits, "How many plants did I acquire in the last month?"
     )
     assert "Suggested distinct item count: 3" in ad
     assert "along with" in ad.lower() or "succulent" in ad.lower()
+    assert "fencing" not in ad.lower()
     # "two weeks ago" must not become Candidate numeric claim 2
     assert "Candidate numeric claims: 2←" not in ad
 
