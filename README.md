@@ -31,7 +31,7 @@ Built on [FalkorDB](https://falkordb.com) (bi-temporal graph + vector) and [Post
 
 Publishable suite claim: **81.0%** (405/500) on LongMemEval-S, fair lite ingest (no retain, no LLM rerank, no chunk/event atoms). Answer model: DeepSeek V4 Pro (Novita). Judge: DeepSeek V3.2. Archive: `fair_c4_500_20260720_1802/`. Prior claim: 80.4% (`fair_c3_500`).
 
-Accuracy when Recall@5 &gt; 0: **83.15%**. When Recall@5 = 0: **58.14%**.
+Accuracy when Recall@5 is positive: **83.15%**. When Recall@5 is zero: **58.14%**.
 
 | Type | What it tests | Acc | n |
 |------|----------------|----:|--:|
