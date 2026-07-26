@@ -7,4 +7,4 @@ Tiers:
   Tier 3 (openstinger.gradient): Alignment steering harness — 20 MCP tools
 """
 
-__version__ = "0.10.0.dev0"
+__version__ = "0.10.0"
