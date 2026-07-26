@@ -1,7 +1,19 @@
 # OpenStinger
 
+**Open-source MCP agent memory server** for OpenClaw, Cursor, Claude Code, Nanobot, and every MCP-compatible runtime.
+
+| | |
+|--|--|
+| What it is | Self-hosted **MCP memory server** (SSE): bi-temporal graph + vectors + audit DB |
+| Tools | **32 MCP tools** (episodic memory, StingerVault, Gradient alignment) |
+| Benchmark | Fair **LongMemEval-S 81.0%** (405/500), lite ingest, no retain, no LLM rerank |
+| Stack | [FalkorDB](https://falkordb.com) + [PostgreSQL](https://postgresql.org) + [MCP](https://modelcontextprotocol.io) |
+| License | MIT |
+
+Agents and humans searching for *MCP memory server*, *Cursor persistent memory*, *OpenClaw memory*, *LongMemEval*, or *bi-temporal agent memory*: this repo is that layer.
+
 <p align="center">
-  <img src="assets/OpenStinger_Logo_v3_transparent.png" alt="OpenStinger" width="480">
+  <img src="assets/OpenStinger_Logo_v3_transparent.png" alt="OpenStinger MCP agent memory server" width="480">
 </p>
 
 <p align="center">
@@ -13,19 +25,18 @@
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/Python-3.10%2B-blue?style=for-the-badge&logo=python" alt="Python 3.10+"></a>
   <a href="https://falkordb.com"><img src="https://img.shields.io/badge/FalkorDB-1.6%2B-orange?style=for-the-badge" alt="FalkorDB"></a>
   <a href="https://modelcontextprotocol.io"><img src="https://img.shields.io/badge/MCP-1.26%2B-green?style=for-the-badge" alt="MCP"></a>
+  <a href="#longmemeval-fair-path"><img src="https://img.shields.io/badge/LongMemEval-81%25%20fair-yellow?style=for-the-badge" alt="LongMemEval 81% fair"></a>
 </p>
 
 <p align="center">
   Works with&nbsp;
   <strong>OpenClaw &nbsp;·&nbsp; Nanobot &nbsp;·&nbsp; ZeroClaw &nbsp;·&nbsp; NanoClaw &nbsp;·&nbsp; PicoClaw &nbsp;·&nbsp; Claude Code &nbsp;·&nbsp; Cursor &nbsp;·&nbsp; Qwen-Agent &nbsp;·&nbsp; DeerFlow &nbsp;·&nbsp; LangGraph</strong><br>
-  — any MCP-compatible runtime. One endpoint. Zero lock-in.
+  any MCP-compatible runtime. One endpoint. Zero lock-in.
 </p>
 
 ---
 
-The autonomous era needs more than execution. Agents hallucinate facts. They drift from their values. They forget who they are. **OpenStinger** is the memory, reasoning, and alignment infrastructure that keeps them grounded — exposed as 32 MCP tools any agent calls natively.
-
-Built on [FalkorDB](https://falkordb.com) (bi-temporal graph + vector) and [PostgreSQL](https://postgresql.org) (operational audit DB), served over [Model Context Protocol](https://modelcontextprotocol.io). No SDK changes. No vendor lock-in.
+OpenStinger is portable **agent memory infrastructure**: hybrid BM25 + vector search, bi-temporal validity, structured vault notes, and optional alignment checks. Point any MCP client at `http://localhost:8766/sse`. No SDK lock-in. Memory lives in two Docker volumes you can move between hosts and runtimes.
 
 ### LongMemEval (fair path)
 
@@ -74,7 +85,23 @@ Start alongside. Go primary when ready. No framework migration required.
 | **NanoClaw** | ✅ Agent SDK native | [View guide](integrations/NANOCLAW.md) |
 | **PicoClaw** | ✅ v0.8 | [View guide](integrations/PICOCLAW.md) |
 | **Claude Code** | ✅ MCP native | Point at `http://localhost:8766/sse` |
-| **Cursor** | ✅ MCP native | Point at `http://localhost:8766/sse` |
+| **Cursor** | ✅ MCP native | [Cursor persistent memory setup](#cursor-persistent-memory-mcp) |
+
+### Cursor persistent memory (MCP)
+
+OpenStinger is an MCP memory server for Cursor (and Claude Code). Add the SSE endpoint to `.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "openstinger": {
+      "url": "http://localhost:8766/sse"
+    }
+  }
+}
+```
+
+Start OpenStinger (`python -m openstinger.mcp.server` after Docker + config), then use tools such as `memory_query`, `memory_add`, and `memory_wake_up` from the agent. Same server works for OpenClaw and other MCP clients. Site guide: [openstinger.com](https://openstinger.com/#cursor-memory).
 
 ---
 
