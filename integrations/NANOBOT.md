@@ -64,11 +64,7 @@ No Nanobot source code changes required. The codebase stays small. The memory sy
 
 ## About Tier 3: Gradient
 
-The "Gradient alignment evaluation per response" row in the comparison table is mathematical:
-
-> **dE/dt = β(C–D)E**
-
-**E** = accumulated episodic memory · **β** = distilled self-knowledge · **C** = agent's own defined constraints · **D** = observed deviation per response. Every output is scored against the agent's own evolving baseline — not a static rule set. Starts in `observe_only = true` by default: measuring without blocking.
+Gradient scores each response against the agent's vault-derived alignment profile (identity, constraints, preferences). Starts in `observe_only = true` by default: measuring and logging without blocking.
 
 ---
 

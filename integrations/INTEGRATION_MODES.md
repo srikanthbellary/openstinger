@@ -4,7 +4,7 @@
 > Add OpenStinger to whatever *Claw framework you're running today.
 > Start alongside. Go primary when ready. No framework has to be abandoned.
 
-This guide covers the three adoption modes for connecting OpenStinger to any MCP-compatible agent runtime — OpenClaw, Nanobot, ZeroClaw, NanoClaw, PicoClaw, or any *Claw framework that ships with built-in memory.
+This guide covers the three adoption modes for connecting OpenStinger to any MCP-compatible agent runtime — OpenClaw, Cursor, Claude Code, Nanobot, Hermes, DeerFlow, Qwen-Agent, LangGraph, ZeroClaw, NanoClaw, PicoClaw, or any runtime that speaks MCP.
 
 ---
 

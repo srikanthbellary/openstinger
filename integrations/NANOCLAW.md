@@ -61,11 +61,7 @@ Shared entity_registry: "Alice" = same UUID in all namespaces
 
 ## About Tier 3: Gradient (Per-Agent Alignment)
 
-OpenStinger's Tier 3 runs alignment evaluation per-response using:
-
-> **dE/dt = β(C–D)E**
-
-**E** = accumulated episodic memory · **β** = distilled self-knowledge · **C** = the agent's own defined constraints · **D** = observed deviation. In a NanoClaw swarm, each agent runs its own Gradient evaluation against its own namespace's knowledge — alignment is measured per-agent, not globally. The orchestrator can query `gradient_history` and `drift_status` across all agents to detect which swarm member is drifting.
+In a NanoClaw swarm, each agent runs Gradient against its own namespace's vault-derived profile. Alignment is measured per-agent, not globally. The orchestrator can query `gradient_history` and `drift_status` across agents to see which member is drifting. Starts in `observe_only = true` by default.
 
 ---
 

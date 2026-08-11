@@ -1,16 +1,17 @@
 # OpenStinger
 
-**Open-source MCP agent memory server** for OpenClaw, Cursor, Claude Code, Nanobot, and every MCP-compatible runtime.
+**v1.0** — Open-source **MCP agent memory server**. Self-hosted. Plug into any MCP-compatible agent runtime.
 
 | | |
 |--|--|
-| What it is | Self-hosted **MCP memory server** (SSE): bi-temporal graph + vectors + audit DB |
-| Tools | **32 MCP tools** (episodic memory, StingerVault, Gradient alignment) |
+| What it is | Portable **agent memory** over MCP (SSE): bi-temporal graph + vectors + PostgreSQL audit |
 | Benchmark | Fair **LongMemEval-S 81.0%** (405/500), lite ingest, no retain, no LLM rerank |
+| Tools | **32 MCP tools** across episodic memory, StingerVault, and Gradient alignment |
+| Plug in | OpenClaw, Cursor, Claude Code, Nanobot, Hermes, DeerFlow, Qwen-Agent, LangGraph, *Claw family |
 | Stack | [FalkorDB](https://falkordb.com) + [PostgreSQL](https://postgresql.org) + [MCP](https://modelcontextprotocol.io) |
 | License | MIT |
 
-Agents and humans searching for *MCP memory server*, *Cursor persistent memory*, *OpenClaw memory*, *LongMemEval*, or *bi-temporal agent memory*: this repo is that layer.
+Search phrases this project matches: *MCP memory server*, *Cursor persistent memory*, *OpenClaw memory*, *LongMemEval*, *bi-temporal agent memory*, *self-hosted agent memory*.
 
 <p align="center">
   <img src="assets/OpenStinger_Logo_v3_transparent.png" alt="OpenStinger MCP agent memory server" width="480">
@@ -30,13 +31,13 @@ Agents and humans searching for *MCP memory server*, *Cursor persistent memory*,
 
 <p align="center">
   Works with&nbsp;
-  <strong>OpenClaw &nbsp;·&nbsp; Nanobot &nbsp;·&nbsp; ZeroClaw &nbsp;·&nbsp; NanoClaw &nbsp;·&nbsp; PicoClaw &nbsp;·&nbsp; Claude Code &nbsp;·&nbsp; Cursor &nbsp;·&nbsp; Qwen-Agent &nbsp;·&nbsp; DeerFlow &nbsp;·&nbsp; LangGraph</strong><br>
-  any MCP-compatible runtime. One endpoint. Zero lock-in.
+  <strong>OpenClaw &nbsp;·&nbsp; Cursor &nbsp;·&nbsp; Claude Code &nbsp;·&nbsp; Nanobot &nbsp;·&nbsp; Hermes &nbsp;·&nbsp; DeerFlow &nbsp;·&nbsp; Qwen-Agent &nbsp;·&nbsp; LangGraph &nbsp;·&nbsp; ZeroClaw &nbsp;·&nbsp; NanoClaw &nbsp;·&nbsp; PicoClaw</strong><br>
+  Any MCP-compatible runtime. One endpoint. Memory stays when the agent runtime changes.
 </p>
 
 ---
 
-OpenStinger is portable **agent memory infrastructure**: hybrid BM25 + vector search, bi-temporal validity, structured vault notes, and optional alignment checks. Point any MCP client at `http://localhost:8766/sse`. No SDK lock-in. Memory lives in two Docker volumes you can move between hosts and runtimes.
+OpenStinger is **pluggable agent memory infrastructure**. Hybrid BM25 + vector search, bi-temporal fact validity, structured vault notes, and optional alignment evaluation. Point any MCP client at `http://localhost:8766/sse`. No SDK lock-in. Memory lives in Docker volumes you can move between hosts and runtimes.
 
 ### LongMemEval (fair path)
 
@@ -84,6 +85,7 @@ Start alongside. Go primary when ready. No framework migration required.
 | **ZeroClaw** | ✅ swappable trait | [View guide](integrations/ZEROCLAW.md) |
 | **NanoClaw** | ✅ Agent SDK native | [View guide](integrations/NANOCLAW.md) |
 | **PicoClaw** | ✅ v0.8 | [View guide](integrations/PICOCLAW.md) |
+| **Hermes** | ✅ MCP native | [View guide](integrations/HERMES.md) |
 | **Claude Code** | ✅ MCP native | Point at `http://localhost:8766/sse` |
 | **Cursor** | ✅ MCP native | [Cursor persistent memory setup](#cursor-persistent-memory-mcp) |
 
@@ -204,7 +206,7 @@ OpenStinger speaks MCP over SSE. The config is identical across all supported fr
 }
 ```
 
-> See [integrations/](integrations/) for framework-specific setup guides (OpenClaw, DeerFlow, Qwen-Agent, LangGraph, Nanobot, ZeroClaw, NanoClaw, PicoClaw).
+> See [integrations/](integrations/) for framework-specific setup guides (OpenClaw, Cursor, Claude Code, Nanobot, Hermes, DeerFlow, Qwen-Agent, LangGraph, ZeroClaw, NanoClaw, PicoClaw).
 
 Then your agent can call:
 ```bash

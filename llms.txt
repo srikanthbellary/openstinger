@@ -1,15 +1,17 @@
 # OpenStinger
 
-> Open-source MCP agent memory server for OpenClaw, Cursor, Claude Code, and any MCP-compatible runtime.
+> OpenStinger v1.0: open-source MCP agent memory server for OpenClaw, Cursor, Claude Code, Hermes, and any MCP-compatible runtime.
 
-OpenStinger is a self-hosted Model Context Protocol (MCP) memory server. It stores bi-temporal episodic memory in FalkorDB (graph + vectors), keeps an operational audit trail in PostgreSQL, and exposes 32 MCP tools over SSE (default `http://localhost:8766/sse`).
+OpenStinger is a self-hosted Model Context Protocol (MCP) memory server. It stores bi-temporal episodic memory in FalkorDB (graph + vectors), keeps an operational audit trail in PostgreSQL, and exposes 32 MCP tools over SSE (default `http://localhost:8766/sse`). Plug the same endpoint into any MCP client; store memory independently of the agent runtime.
 
 ## Key facts
 
+- Version: 1.0.0
 - Product type: MCP memory server / agent memory layer / OpenClaw memory / Cursor persistent memory
 - Benchmark: Fair LongMemEval-S 81.0% (405/500), lite ingest, no retain, no LLM rerank
 - Answer stack for that claim: DeepSeek V4 Pro; judge DeepSeek V3.2
 - Tools: 32 MCP tools across memory, StingerVault, Gradient alignment
+- Compatible runtimes: OpenClaw, Cursor, Claude Code, Nanobot, Hermes, DeerFlow, Qwen-Agent, LangGraph, ZeroClaw, NanoClaw, PicoClaw
 - License: MIT
 - Repo: https://github.com/srikanthbellary/openstinger
 - Site: https://openstinger.com
@@ -29,7 +31,8 @@ OpenStinger is a self-hosted Model Context Protocol (MCP) memory server. It stor
 - Cursor MCP setup: https://github.com/srikanthbellary/openstinger#cursor-persistent-memory-mcp
 - Integration modes: https://github.com/srikanthbellary/openstinger/blob/main/integrations/INTEGRATION_MODES.md
 - OpenClaw: https://github.com/srikanthbellary/openstinger/blob/main/integrations/OPENCLAW.md
+- Hermes: https://github.com/srikanthbellary/openstinger/blob/main/integrations/HERMES.md
 
 ## Search phrases this project matches
 
-MCP memory server, agent memory MCP, Cursor persistent memory, Cursor memory MCP, OpenClaw memory, Claude Code memory, bi-temporal agent memory, FalkorDB memory, LongMemEval, self-hosted agent memory, portable agent memory
+MCP memory server, agent memory MCP, Cursor persistent memory, Cursor memory MCP, OpenClaw memory, Claude Code memory, Hermes agent memory, bi-temporal agent memory, FalkorDB memory, LongMemEval, self-hosted agent memory, portable agent memory, pluggable agent memory

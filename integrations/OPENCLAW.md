@@ -84,11 +84,7 @@ GROUP BY verdict;
 
 ## About Tier 3: Gradient
 
-The "Dynamic Gradient (per-output scoring)" row in the table above is a mathematical model, not a philosophical one:
-
-> **dE/dt = �(C�D)E**
-
-**E** = accumulated episodic memory � **�** = distilled self-knowledge from StingerVault � **C** = agent's own defined constraints � **D** = observed deviation per response. Every output is scored against the agent's own evolving baseline � not a static `SOUL.md` file. Gradient starts in `observe_only = true` by default: always measuring, never blocking, until you're ready.
+Gradient scores each response against the agent's vault-derived alignment profile. Unlike a static `SOUL.md` injection, evaluation continues after context compaction. Starts in `observe_only = true` by default: measuring and logging without blocking.
 
 ---
 

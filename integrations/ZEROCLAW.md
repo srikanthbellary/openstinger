@@ -52,11 +52,7 @@ For edge/IoT deployments: run ZeroClaw on \ hardware, point it at an OpenStinger
 
 ## About Tier 3: Gradient
 
-OpenStinger's Tier 3 (Gradient) evaluates agent alignment using a differential model:
-
-> **dE/dt = β(C–D)E**
-
-**E** = accumulated episodic memory · **β** = distilled self-knowledge · **C** = the agent's own defined constraints · **D** = observed deviation per response. Every output is scored against the agent's own evolving baseline. Starts in `observe_only = true`: always measuring, never blocking, until you configure otherwise.
+Gradient scores each response against the agent's vault-derived alignment profile (identity, constraints, preferences). Starts in `observe_only = true` by default: measuring and logging without blocking.
 
 ---
 
